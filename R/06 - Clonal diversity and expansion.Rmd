@@ -1,0 +1,305 @@
+---
+title: "BCR Clonal diversity and expansion"
+author: "Stephen-John Sammut"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r load-data}
+rm(list=ls())
+
+library (Biostrings)
+library (effectsize)
+library (ineq)
+library (posterior)
+
+
+dir.base <- "~/BCR-Immunosurveillance/"
+source (paste0(dir.base,"R/loadData.R"))
+
+dir.mrdarcy.bcr.output <- paste0(dir.mrdarcy.bcr.mets, "output/")
+
+# Precomputed clonal diversity metrics file
+file.diversity <- paste0(dir.out.data,"Clonal-diversity-metrics.RData")
+
+#Number of subsampling operations
+numberOfIterations <- 1000
+
+# creates an empty matrix, row=sample, col=subsampling iteration 
+# this matrix is populated with gini/shannon indexes
+createDiversityMatrix <- function(sampleIds,numIter){
+  matrix(0,nrow=length(sampleIds),ncol=numIter,
+         dimnames=list(sampleIds,c(1:numIter)))
+}
+
+```
+
+```{r load-clone-data}
+
+# Load BCR data from MRDARCY output
+
+loadMixtures <- function(dir){
+  
+  folders <- list.dirs(dir)[-1]
+  folders <- folders[!grepl("CLONES",folders)]
+  
+  # load number of UMIs (duplicate_count) per BCR sequence per sample
+  counts <- list()
+  for (f in folders){
+    donor <- basename(f)
+    fasta <- paste0(f,"/Combined_fully_reduced_A_sequences_",donor,".fasta.gz")
+    fasta <- readDNAStringSet(fasta)
+    n     <- names(fasta)
+    seqID <- sapply(strsplit(n,"__"),"[",1)
+    duplicate_count <- sapply(strsplit(sapply(strsplit(n,"__"),"[",2),"\\|"),"[",1)
+    if (grepl("_",duplicate_count[1])){
+      duplicate_count <- sapply(strsplit(duplicate_count,"_"), function(x) sum(as.numeric(x)))
+    }
+    sample <- sapply(strsplit(n,"\\|"),"[",3)
+    fastaDf <- data.table(names=seqID, duplicate_count=duplicate_count,
+                          donor=donor, sample_id=sample)
+    counts[[f]]<-fastaDf
+  }
+  
+  counts <- rbindlist(counts)
+  counts$tempID <- paste0(counts$names,"|",counts$sample_id)
+  x <- counts
+  x$ClusterID <- "none"
+  
+  # Add ClusterID to each BCR sequence
+  for (donorCase in unique(x$donor)){
+    clustering <- fread(paste0(dir,"/",donorCase,"/Merge_clustering_",donorCase,".txt.gz"))
+    colnames(clustering)[1] <- "ClusterID"
+    x1 <- x[x$donor!=donorCase,]
+    x2 <- merge(x[x$donor==donorCase,c(1:5)],clustering[,c(1,2)],
+                by.x="tempID",by.y="Sequence_ID",all.x=T)
+    x<-rbind(x1,x2)
+  }
+  x[complete.cases(x),]
+}
+
+bcrClones <- loadMixtures(dir.mrdarcy.bcr.output)
+bcrClones$tempID <- NULL
+
+
+```
+
+
+```{r compute-clonal-expansion}
+
+samples = sort(unique(bcrClones$sample_id))
+t = table(rep(bcrClones$sample_id, bcrClones$duplicate_count))
+min_BCR = ceiling(min(t)*0.9) ##### vertex diversity
+
+t = table(bcrClones$sample_id)
+min_cluster = ceiling(min(t)*0.9) ##### cluster diversity
+
+df.shannon   <- createDiversityMatrix(samples, numberOfIterations)
+df.gini      <- createDiversityMatrix(samples, numberOfIterations)
+df.mean_size <- createDiversityMatrix(samples, numberOfIterations)
+df.shannon_cluster  <- createDiversityMatrix(samples, numberOfIterations)
+df.gini_cluster     <- createDiversityMatrix(samples, numberOfIterations)
+df.mean_size_cluster<- createDiversityMatrix(samples, numberOfIterations)
+
+
+for (s in c(1:length(samples))){
+  w1 <- which(bcrClones$sample_id==samples[s])
+  bcrClones1 <- bcrClones[w1,]
+  for (iteration in c(1:numberOfIterations)){
+    
+    ## sample individual BCRs
+    sample_BCRs <- sample(c(1:nrow(bcrClones1)), min_BCR, prob = bcrClones1$duplicate_count/sum(bcrClones1$duplicate_count), replace = T)
+    nBCRs_sample <- table(sample_BCRs)
+    df.gini[samples[s],iteration]      <- Gini(nBCRs_sample)
+    df.shannon[samples[s],iteration]   <- entropy(nBCRs_sample) ### using posterior package
+    df.mean_size[samples[s],iteration] <- mean(nBCRs_sample/sum(nBCRs_sample)*100)
+    
+    ## sample unique BCR sequences
+    sample_BCRs <- sample(c(1:nrow(bcrClones1)), min_cluster, replace = F)
+    nBCRs_sample <- table(bcrClones1$ClusterID[sample_BCRs])
+    
+    df.gini_cluster[samples[s],iteration] <- Gini(nBCRs_sample)
+    df.shannon_cluster[samples[s],iteration] <- entropy(nBCRs_sample) ### using posterior package
+    df.mean_size_cluster[samples[s],iteration] <- mean(nBCRs_sample/sum(nBCRs_sample)*100)
+    
+  }
+}
+
+############ clonal expansion
+
+expansion <- data.frame(
+  sample  = rownames(df.shannon),
+  shannon = apply(df.shannon,1,mean),
+  gini    = apply(df.gini,1,mean),
+  mean_size    = apply(df.mean_size,1,mean)
+)
+
+#Plot output
+
+div <- merge(expansion,metadata.mets.noAbbrev,by.x="sample",by.y="Sample.ID")
+div$case <- "Other sites"
+div[div$Disease.site=="LN","case"] <- "Lymph node"
+
+d <- melt(div,measure.vars=c("shannon","gini","mean_size"))
+
+plot.EFig5a <- ggplot(d[d$variable!="mean_size",],aes(x=case,y=value,fill=case))+
+  geom_boxplot(outlier.size = 0.5,width=0.8)+
+  geom_point(size=0.5)+
+  facet_grid(~variable)+
+  stat_compare_means(label="p.format")+
+  scale_y_continuous(limits = c(0,0.75))+
+  labs(x="",y="Clonal expansion index")+
+  scale_fill_manual(values=c("#ff7f00","gray80"))+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        panel.grid.major.x = element_blank(),
+        strip.background = element_blank())+
+  guides(fill="none")+
+  theme_manuscript()+
+  theme(strip.background = element_blank())
+
+plot.EFig5a
+
+pdf(paste0(dir.out.plots,"EFig5a.pdf"),height=7/2.54,width=8/2.54)
+plot.EFig5a
+dev.off()
+
+c <- cohens_d(shannon ~ case, data = div)
+c1 <- c(c$Cohens_d, c$CI_low,c$CI_high)
+c <- cohens_d(gini ~ case, data = div)
+c2 <- c(c$ Cohens_d, c$ CI_low,c$ CI_high)
+c <- cohens_d(mean_size ~ case, data = div)
+c3 <- c(c$ Cohens_d, c$ CI_low,c$ CI_high)
+
+c <- rbind(c1, c2, c3)
+colnames(c) <- c("Cohens_d", "CI_low", "CI_high")
+rownames(c) <- c("shannon", "gini", "mean_size")
+c
+
+plot.Fig4a <- ggplot(d[d$variable=="mean_size",],aes(x=case,y=value,fill=case))+
+  geom_boxplot(outlier.size = 0.5,width=0.8)+
+  geom_point(size=0.5)+
+  stat_compare_means(label="p.format")+
+  scale_y_continuous(limits = c(0,0.3))+
+  labs(x="",y="Mean clone size (%)")+
+  scale_fill_manual(values=c("#ff7f00","gray80"))+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        panel.grid.major.x = element_blank(),
+        strip.background = element_blank())+
+  guides(fill="none")+
+  theme_manuscript()+
+  theme(strip.background = element_blank())
+
+plot.Fig4a
+
+pdf(paste0(dir.out.plots,"Fig4a.pdf"),height=6.3/2.54,width=4.55/2.54)
+plot.Fig4a
+dev.off()
+
+```
+
+```{r plot-per-site-prop-of-immunosurveilling-clones}
+
+# Plot Figure 4b
+
+# Load number of UMIs/clone/site
+# Retain clones present >1 site + >= 4 unique VDJs
+getSummaryTables <- function(dir){
+  frequencies <- numeric()
+  donors <- list.dirs(dir,recursive = F)
+  donorList <- list()
+  for (s in donors){
+    donor <- basename(s)
+    d     <- fread(paste0(s,"/Merge_clustering_",donor,".txt.gz"))
+    # ignore donors with only one sample
+    if (length(unique(d$Sample_ID))>1) {
+      x <- table(d$`#cluster_ID`,d$Sample_ID)
+      # retain clones seen in more than one site
+      y <- x[apply(x,1,function(y) sum(y>0)>1),]
+      # with at least four distinct VDJs within one site
+      y <- y[apply(y,1,function(z) any(z>=4)),]
+      donorList[[basename(s)]]<-y
+    }
+  }
+  donorList
+}
+
+bcrs <- getSummaryTables(dir.mrdarcy.bcr.output)
+
+# Normalise BCR clones by dividing the total number of VDJs per clone per sample 
+# by the sum of the number of VDJs for that clone in all samples (rowsums)
+normBcrs <- lapply(bcrs, function(y) prop.table(y,margin = 1))
+
+n <- lapply(normBcrs, function(x) apply(x,2, function(y) mean(y[y!=0])))
+n <- data.frame(value=unlist(n), stringsAsFactors = F)
+n$donor <- sapply(strsplit(rownames(n),"\\."),"[",1)
+n$sample <- sapply(strsplit(rownames(n),"\\."),"[",2)
+
+n <- merge(n, metadata.mets.noAbbrev,by.x="sample",by.y="Sample.ID")
+n$Site2 <- "Other sites"
+n[n$Disease.site=="LN","Site2"]<-"Lymph node"
+
+plot.Fig4b <- ggplot(n,aes(x=Site2,y=value,fill=Site2))+
+  geom_boxplot(outlier.size = 0.5,width=0.8)+
+  geom_point(size=0.8)+
+  labs(x="",y="Per site proportion of \nimmunosurveilling clones")+
+  theme_manuscript(base_size = 12)+
+  stat_compare_means(label="p.format")+
+  scale_fill_manual(values=c("#ff7f00","gray80"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))+
+  theme_manuscript()+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        panel.grid.major.x = element_blank())+
+  guides(fill="none")
+
+pdf(paste0(dir.out.plots,"Fig4ab.pdf"),height=7.5/2.54,width=13/2.54)
+ggarrange(plot.Fig4a,plot.Fig4b,widths = c(1.7,1))
+dev.off()
+
+```
+
+
+```{r plot-percentage-expanded-per-sample}
+
+# Get the proportion of expanded clones/sample (representing >= 4 unique VDJs)
+# EFig 5b
+
+getProportionTables <- function(dir){
+  frequencies <- numeric()
+  samples <- list.dirs(dir,recursive = F)
+  donorList <- list()
+  for (s in samples){
+    donor <- basename(s)
+    d <- fread(paste0(s,"/Merge_clustering_",donor,".txt.gz"))
+    x <- table(d$`#cluster_ID`,d$Sample_ID)
+    proportions <- apply(x,2, function(y) sum(y>=4))/nrow(x)
+    p <- data.frame(proportions)
+    p$case <- rownames(p)
+    donorList[[basename(s)]] <- p
+  }
+  do.call(rbind,donorList)
+}
+
+bcrs <- getProportionTables(dir.mrdarcy.bcr.output)
+
+n <- bcrs
+n <- merge(n,metadata.mets.noAbbrev,by.x="case",by.y="Sample.ID")
+n$case <- "Other Sites"
+n[n$Disease.site=="LN","case"] <- "Lymph node"
+
+plot.EFig5b <- ggplot(n,aes(x=case,y=proportions*100,fill=case))+
+  geom_boxplot(width=0.8,outlier.size = 0.5)+
+  geom_point(size=0.5)+
+  labs(x="",y="Expanded clones/sample (%)")+
+  stat_compare_means(label="p.format")+
+  scale_fill_manual(values=c("#ff7f00","gray80"))+
+  theme_manuscript()+
+  theme(panel.grid.major.x = element_blank())+
+  guides(fill="none")
+
+pdf(paste0(dir.out.plots,"EFig5b.pdf"),height=6.5/2.54,width=4.5/2.54)
+plot.EFig5b
+dev.off()
+```
+

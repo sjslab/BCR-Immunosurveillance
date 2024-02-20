@@ -1,0 +1,483 @@
+---
+title: "BCR and TCR repertoire statistics"
+author: "Stephen-John Sammut"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r load-data}
+
+rm(list=ls())
+
+library (pheatmap)
+library (RColorBrewer)
+
+# dir.base should point to the location of the main project directory 
+dir.base <- "~/BCR-Immunosurveillance/"
+source (paste0(dir.base,"R/loadData.R"))
+
+# BCR counts, samples from different libraries not merged
+# This file can be provided once approval from the Data Access Committee is secured.
+bcrCountsFileUnCollapsed.metastatic <- paste0(dir.data,"/unprocessed/sequencing/03-consensus-cuts/",
+                                              "unmerged/keepShared_consensus-gt2.metastatic.RData")
+
+```
+
+
+```{r jaccard-function}
+
+# compute Jaccard similarity coefficient
+jaccard <- function(a, b) {
+  intersection = length(intersect(a, b))
+  union = length(a) + length(b) - intersection
+  return (intersection/union)
+}
+
+computeJaccardFromList<-function(x){
+  samples <- unique(x$sample_id)
+  mat <- matrix(ncol=length(samples),nrow=length(samples),
+                dimnames=list(sort(samples),sort(samples)))
+  mat[upper.tri(mat)] <- 0
+  for (r in samples){
+    for (c in samples){
+      if (!is.na(mat[r,c])){
+        mat[r,c] <- jaccard(x[x$sample_id==r]$id, x[x$sample_id==c]$id)
+      }
+    }
+  }
+  mat
+}
+
+loadMrDarcyClusters <- function(mrdDir){
+  clusterList <- list()
+  donors <- list.dirs(mrdDir)[!grepl("CLONES",list.dirs(mrdDir))][-1]
+  for (d in donors){
+    clusters <- fread(paste0(d,"/Merge_clustering_",basename(d),".txt.gz"))
+    clusters <- clusters[,c(2,3)]
+    clusters$Sequence_ID <- sapply(strsplit(clusters$Sequence_ID,"\\|"),"[",1)
+    clusterList[[d]] <- clusters
+  }
+  clusterList <- rbindlist(clusterList)
+  colnames(clusterList) <- c("id","sample_id")
+  clusterList
+}
+
+```
+
+```{r bcr-tcr-coverage-metastatic}
+
+#BCR coverage in metastatic breast cancer cohort
+bcr.met <- readRDS(file$bcr.counts.mets)
+b.met   <- do.call(rbind,bcr.met)
+
+# We obtained a mean yield of 9,332 unique BCRs per metastatic site after 
+# filtering (range: 701-80,409
+numberofUniqBCRs <- table(b.met$sample_id)
+summary(as.numeric(numberofUniqBCRs))
+
+d <- data.frame(numberofUniqBCRs)
+d <- d[order(d$Var1),]
+write.table(d, paste0(dir.out.data,"BCR-sequences-post-filtering.tsv"),
+            quote = F, col.names = T, row.names = F, sep="\t")
+
+#TRA coverage
+tra <- loadMrDarcyClusters(paste0(dir.mrdarcy.tcr.mets,"output/TRA/"))
+numberofUniqTRA<- table(tra$sample_id)
+ta <- data.frame(numberofUniqTRA)
+ta <- ta[order(ta$Var1),]
+
+#TRB coverage
+trb <- loadMrDarcyClusters(paste0(dir.mrdarcy.tcr.mets,"output/TRB/"))
+numberofUniqTRB<- table(trb$sample_id)
+tb <- data.frame(numberofUniqTRB)
+tb <- tb[order(tb$Var1),]
+tb <- tb[complete.cases(tb),]
+
+all <- merge(d, merge(ta,tb,by="Var1"),by="Var1")
+colnames(all) <- c("Var1","BCR","TRA","TRB")
+rownames(all) <- all$Var1
+all$Var1 <- NULL
+
+# generate heatmap
+stopifnot(sum(metadata.mets$Sample.ID!=rownames(all))==0)
+
+annotation <- data.frame(
+  Site = metadata.mets$Disease.site,
+  Donor = gsub("E","",sapply(strsplit(rownames(all),"-"),"[",1)))
+rownames(annotation) <- rownames(all)
+
+donor        <- c('#a6cee3','#1f78b4','#b2df8a','#33a02c','#fb9a99','#e31a1c','#fdbf6f','#ff7f00')
+names(donor) <- c("288", "290", "298", "308", "315", "323", "328", "330")
+anno_colors  <- list(Site=cols.organ,Donor = donor)
+
+cols <- c('#e0f3db','#a8ddb5','#7bccc4','#4eb3d3','#2b8cbe','#084081','#041c39')
+
+myBreaks=c(0,5000,10000,20000,30000,50000,80000,90000)
+
+plot.eFig1a <- 
+  pheatmap(t((all)),scale="none",cellwidth = 15,cellheight = 15, 
+           color = cols,border_color = "gray60",breaks = myBreaks,legend_breaks = myBreaks,
+           labels_col = sapply(strsplit(rownames(all),"-"),"[",2),
+           annotation_col = annotation, annotation_colors = anno_colors,
+           cluster_rows = F,cluster_cols = F,
+           gaps_col = c(1,2,3,12,20,22,23),silent = F)
+
+cairo_pdf(paste0(dir.out.plots,"EFig1a.pdf"),height=7,width=10,onefile=T)
+plot.eFig1a
+dev.off()
+
+rm(plot.eFig1a, ta, tb, tra, trb, d, bcr.met, annotation, anno_colors, all)
+
+```
+
+
+```{r bcr-coverage-early}
+
+#BCR coverage in early breast cancer cohort
+bcr.early <- readRDS(file$bcr.counts.early)
+b.early   <- do.call(rbind,bcr.early)
+
+# We obtained a mean yield of 8,132 unique BCRs per biopsy site after 
+# filtering (range: 762-15,493
+numberofUniqBCRs <- table(b.early$sample_id)
+summary(as.numeric(numberofUniqBCRs))
+
+d <- data.frame(numberofUniqBCRs)
+d <- d[order(d$Var1),]
+write.table(d, paste0(dir.out.data,"BCR-sequences-post-filtering.tsv"),quote = F, col.names = T, row.names = F, sep="\t")
+
+all <- d
+colnames(all) <- c("Var1","BCR")
+rownames(all) <- all$Var1
+all$Var1 <- NULL
+all$time <- as.character(factor(sapply(strsplit(rownames(all),"-"),"[",2),
+                                levels=c("diagnosis","midway","surgical"),
+                                labels=c("Pre","Midway","Post")))
+# generate heatmap
+annotation <- data.frame(
+  Donor = sapply(strsplit(rownames(all),"-"),"[",1))
+rownames(annotation) <- rownames(all)
+
+unique(annotation$Donor)
+donor        <- c('#a6cee3','#1f78b4','#b2df8a','#33a02c','#fb9a99','#e31a1c','#fdbf6f','#ff7f00','brown','gray70')
+names(donor) <- c("T003", "T007", "T013", "T043", "T077", "T104", "T131", "T150",
+                  "T156","T162")
+
+anno_colors  <- list(Donor = donor)
+
+cols <- c('#e0f3db','#a8ddb5','#7bccc4','#4eb3d3')
+
+myBreaks=c(0,5000,10000,15000,20000)
+
+plot.eFig3a <- 
+  pheatmap(t((all[,c(1),drop=F])),scale="none",cellwidth = 15,cellheight = 15, 
+           color = cols,border_color = "gray60",breaks = myBreaks,legend_breaks = myBreaks,
+           labels_col = all$time,
+           annotation_col = annotation, annotation_colors = anno_colors,
+           cluster_rows = F,cluster_cols = F,
+           gaps_col = c(2,5,7,10,12,14,17,20,23),silent = F)
+
+
+cairo_pdf(paste0(dir.out.plots,"EFig3a.pdf"),height=7,width=10,onefile=T)
+plot.eFig3a
+dev.off()
+
+rm(plot.eFig1a, d, bcr.early, annotation, anno_colors, all)
+
+```
+
+
+The following  code blocks compute the Jaccard similarity coefficient between samples.
+Pre computed matrices are made available in the data folder
+
+```{r calculate-bcr-merged-jaccard, eval=F}
+
+# Subsample merged BCR data and compute Jaccard coefficient
+# Slow computation: pre-computed matrices available in the data folder
+b.met$id <- getVDJSequence(b.met)
+b.met <- b.met[,c("sample_id","id")]
+b.met <- b.met[!duplicated(b.met),]
+b.met$id <- as.factor(b.met$id)
+
+# determine subsampling threshold
+sequenceFrequencies <- table(b.met$sample_id)
+sequenceThreshold   <- round(min(sequenceFrequencies)*0.9,0)
+
+jaccardList.met<-list()
+for (i in c(1:10000)){
+  subSampledRows<-b.met[,.SD[sample(.N, min(sequenceThreshold,.N))],by = sample_id]
+  jaccardList.met[[i]]<-computeJaccardFromList(subSampledRows)
+}
+
+saveRDS(jaccardList.met,paste0(dir.out.data,"Jaccard-BCR-sample-merged-overlap-10000.metastatic.RData"))
+
+#early breast cancer
+b.early$id <- getVDJSequence(b.early)
+b.early <- b.early[,c("sample_id","id")]
+b.early <- b.early[!duplicated(b.early),]
+b.early$id <- as.factor(b.early$id)
+
+# determine subsampling threshold
+sequenceFrequencies <- table(b.early$sample_id)
+sequenceThreshold   <- round(min(sequenceFrequencies)*0.9,0)
+
+jaccardList.early<-list()
+for (i in c(1:10000)){
+  subSampledRows<-b.early[,.SD[sample(.N, min(sequenceThreshold,.N))],by = sample_id]
+  jaccardList.early[[i]]<-computeJaccardFromList(subSampledRows)
+}
+
+saveRDS(jaccardList.early,paste0(dir.out.data,"Jaccard-merged-10000.early.RData"))
+
+
+```
+
+```{r  calculate-bcr-unmerged-jaccard, eval=F}
+
+# Subsample unmerged BCR data and compute Jaccard coefficient
+# Slow computation: pre-computed matrices available in the data folder
+
+# load unmerged reads
+bcrUnc.mets <- readRDS(bcrCountsFileUnCollapsed.metastatic)
+bunc.mets   <- do.call(rbind,bcrUnc.mets)
+
+t <- apply(table(bunc.mets$sample_id,bunc.mets$library_id),1, function(x) sum(x!=0))
+haveMoreThanOneSeqReplicate <- names(t[t>1])
+bunc.mets <- bunc.mets[bunc.mets$sample_id %in% haveMoreThanOneSeqReplicate,]
+
+table(bunc.mets$sample_id,bunc.mets$library_id)
+
+bunc.mets$sample_id <- paste0(bunc.mets$sample_id,"_",bunc.mets$library_id)
+bunc.mets$id <- sapply(strsplit(getBCRSequence(bunc.mets),"_"),"[",1)
+bunc.mets <- bunc.mets[,c("sample_id","id")]
+bunc.mets <- bunc.mets[!duplicated(bunc.mets),]
+bunc.mets$id <- as.factor(bunc.mets$id)
+
+# determine subsampling threshold
+sequenceFrequencies <- table(bunc.mets$sample_id)
+sequenceThreshold   <- round(min(sequenceFrequencies)*0.9,0)
+
+jaccardList.metastatic<-list()
+for (i in c(1:10000)){
+  subSampledRows   <- bunc.mets[,.SD[sample(.N, min(sequenceThreshold,.N))],by = sample_id]
+  jaccardList.metastatic[[i]] <- computeJaccardFromList(subSampledRows)
+}
+
+saveRDS(jaccardList.metastatic,paste0(dir.out.data,"Jaccard-BCR-sample-unmerged-overlap-10000.metastatic.RData"))
+
+```
+
+```{r calculate-tcr-jaccard, eval=F}
+
+# Subsample TCR data and compute Jaccard coefficient
+# Slow computation: pre-computed matrices available in the data folder
+
+#TCRa
+tra <- loadMrDarcyClusters(paste0(dir.mrdarcy.tcr,"output/TRA/"))
+# determine subsampling threshold
+sequenceFrequencies <- table(tra$sample_id)
+sequenceThreshold   <- round(min(sequenceFrequencies)*0.9,0)
+
+jaccardList<-list()
+for (i in c(1:10000)){
+  subSampledRows   <- tra[,.SD[sample(.N, min(sequenceThreshold,.N))],by = sample_id]
+  jaccardList[[i]] <- computeJaccardFromList(subSampledRows)
+}
+saveRDS(jaccardList,paste0(dir.out.data,"Jaccard-TRA-sample-merged-overlap-10000.metastatic.RData"))
+
+
+#TCRb
+trb <- loadMrDarcyClusters(paste0(dir.mrdarcy.tcr,"output/TRB/"))
+sequenceFrequencies <- table(trb$sample_id)
+sequenceThreshold   <- round(min(sequenceFrequencies)*0.9,0)
+
+jaccardList<-list()
+for (i in c(1:10000)){
+  subSampledRows   <- trb[,.SD[sample(.N, min(sequenceThreshold,.N))],by = sample_id]
+  jaccardList[[i]] <- computeJaccardFromList(subSampledRows)
+}
+saveRDS(jaccardList,paste0(dir.out.data,"Jaccard-TRB-sample-merged-overlap-10000.metastatic.RData"))
+
+```
+
+```{r merge-jaccard-files-metastatic, eval=F}
+
+reduceJaccardMatrix <- function(j,index){
+  j <- Reduce(`+`, j)/length(j)
+  j <- reshape2::melt(j)
+  j <- j[complete.cases(j),]
+  j$Var1 <- as.character(j$Var1)
+  j$Var2 <- as.character(j$Var2)
+  j$Donor1 <- substring(j$Var1,1,index)
+  j$Donor2 <- substring(j$Var2,1,index)
+  j
+}
+
+jaccardList <- list()
+
+jaccardList[["BCR_unmerged"]] <- readRDS(paste0(dir.out.data,
+                                                ("Jaccard-BCR-sample-unmerged-overlap-10000.metastatic.RData")))
+jaccardList[["BCR_merged"]] <- readRDS(paste0(dir.out.data,
+                                              ("Jaccard-BCR-sample-merged-overlap-10000.metastatic.RData")))
+jaccardList[["TRA"]] <- readRDS(paste0(dir.out.data,
+                                       ("Jaccard-TRA-sample-merged-overlap-10000.metastatic.RData")))
+jaccardList[["TRB"]] <- readRDS(paste0(dir.out.data,
+                                       ("Jaccard-TRB-sample-merged-overlap-10000.metastatic.RData")))
+
+jaccardList[["BCR_merged"]] <- reduceJaccardMatrix(jaccardList[["BCR_merged"]],4)
+jaccardList[["BCR_unmerged"]] <- reduceJaccardMatrix(jaccardList[["BCR_unmerged"]],7)
+jaccardList[["TRA"]] <- reduceJaccardMatrix(jaccardList[["TRA"]],4)
+jaccardList[["TRB"]] <- reduceJaccardMatrix(jaccardList[["TRB"]],4)
+
+
+saveRDS(jaccardList,paste0(dir.out.data,"Jaccard-merged-vs-unmerged-10000.metastatic.RData"))
+
+```
+
+```{r merge-jaccard-files-early, eval=F}
+
+jaccardList <- list()
+
+jaccardList[["BCR"]] <- readRDS(paste0(dir.out.data,
+                                       ("Jaccard-merged-10000.early.RData")))
+
+jaccardList[["BCR"]] <- reduceJaccardMatrix(jaccardList[["BCR"]],4)
+
+
+saveRDS(jaccardList,paste0(dir.out.data,"Jaccard-merged-10000.early.RData"))
+
+```
+
+
+```{r plot-jaccard-similarity-metastatic}
+
+# Plot box plots showing the log10 Jaccard BCR and TCR similarity between technical replicates (n=9 comparisons), related samples derived from the same donor (n=71 comparisons) and unrelated samples (n=208 comparisons)
+
+# Load precomputed matrices
+jaccardList <- readRDS(paste0(dir.out.data,"Jaccard-merged-vs-unmerged-10000.metastatic.RData"))
+
+# BCRs: merged
+b1 <- jaccardList[["BCR_merged"]] 
+b1$receptor <- "BCR"
+b1$class    <- "merged"
+b1$type     <- ifelse(b1$Donor1==b1$Donor2, "Related (intra-donor)",
+                      "Unrelated (inter-donor)")
+
+# BCRs: unmerged
+b2 <- jaccardList[["BCR_unmerged"]]
+b2$receptor <- "BCR"
+b2$class    <- "unmerged"
+# retain technical replicates only
+b2      <- b2[b2$Donor1==b2$Donor2,]
+b2$type <- "Technical replicates"
+
+
+# TCRa
+t1 <- jaccardList[["TRA"]]
+# TCRb
+t2 <- jaccardList[["TRB"]]
+t       <- rbind(cbind(t1,receptor="TRA"), cbind(t2,receptor="TRB"))
+t$class <- "merged"
+t$type  <- ifelse(t$Donor1==t$Donor2,"Related (intra-donor)", "Unrelated (inter-donor)")
+
+j <- rbind(b1,b2,t)
+rm (b1,b2,t1,t2,t)
+
+j$type<-factor(j$type,levels=c("Technical replicates", "Related (intra-donor)",
+                               "Unrelated (inter-donor)"))
+
+table(j$type,j$receptor)
+
+h=j[j$type=="Related (intra-donor)",]
+table(h$Var1,h$receptor)
+plot.eFig1e <- ggplot(j,aes(x=type,y=log10(value+0.0001),fill=type))+
+  geom_boxplot(outlier.size = 0.5,width=0.7)+
+  geom_point(size=0.4)+
+  labs(x="Sample comparisons",y="Log10 Jaccard similarity")+
+  stat_compare_means(label="p.format",comparisons = list(c(1,2),c(2,3),c(1,3)))+
+  scale_fill_manual(values=c("#BF3100","#F5BB00","#558C8C"))+
+  facet_grid(~receptor,space = "free",scales="free")+
+  theme_manuscript()+
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face="bold"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = 45,hjust=1))+
+  guides(fill="none")
+
+pdf(paste0(dir.out.plots,"EFig1e.pdf"),height=4.5,width=5)
+plot.eFig1e
+dev.off()
+
+
+# Plot box plots showing the log10 Jaccard BCR and TCR similarity between samples obtained from donors 308 (n=36 comparisons), 315 (n=28 comparisons) and 330 (n=6 comparisons), as well as unrelated samples (n=208 comparisons).
+
+j$class2 <- ifelse(j$Donor1==j$Donor2, j$Donor1, "Unrelated (inter-donor)")
+j <- j[j$class!="unmerged",]
+j <- j[!j$class2 %in% c("E323"),]
+
+j$class2<-factor(j$class2,levels=c("E308","E315","E330",
+                                   "Unrelated (inter-donor)"),
+                 labels=c("Donor 308","Donor 315","Donor 330",
+                          "Unrelated (inter-donor)"))
+
+
+plot.eFig1f <-
+  ggplot(j,aes(x=class2,y=log10(value+0.0001),fill=class2))+
+  geom_boxplot(outlier.size = 0.5,width=0.9)+
+  geom_point(size=0.4)+
+  labs(x="Sample comparisons",y="Log10 Jaccard similarity")+
+  stat_compare_means(label="p.format",comparisons = list(c(1,4),c(2,4),c(3,4)))+
+  facet_grid(~receptor,space = "free")+
+  theme_manuscript()+
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face="bold"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = 45,hjust=1))+
+  scale_fill_manual(values=c("#5a86c2","#92AFD7","#C5D1EB","#558C8C"))+
+  guides(fill="none")
+
+pdf(paste0(dir.out.plots,"EFig1f.pdf"),height=4.5,width=5.4)
+plot.eFig1f
+dev.off()
+
+
+```
+
+
+```{r plot-jaccard-similarity-early}
+
+# Extended Data Figure 3a: Plot box plots showing the log10 Jaccard BCR and TCR similarity between technical replicates (n=9 comparisons), related samples derived from the same donor (n=71 comparisons) and unrelated samples (n=208 comparisons)
+
+# Load precomputed matrices
+jaccardList <- readRDS(paste0(dir.out.data,"Jaccard-merged-10000.early.RData"))
+
+# BCRs: merged
+b1 <- jaccardList[["BCR"]] 
+b1$receptor <- "BCR"
+b1$type     <- ifelse(b1$Donor1==b1$Donor2, "Related (intra-donor)",
+                      "Unrelated (inter-donor)")
+
+table(b1$type)
+
+#Extended data Figure 3b: box plot showing the log10 Jaccard BCR similarity between related samples derived from the same donor (n=20 comparisons) and unrelated samples (n=280 comparisons). 
+
+plot.eFig3b <- ggplot(b1,aes(x=type,y=log10(value+0.0001),fill=type))+
+  geom_boxplot(outlier.size = 0.5,width=0.7)+
+  geom_point(size=0.4)+
+  labs(x="Sample comparisons",y="Log10 Jaccard similarity")+
+  stat_compare_means(label="p.format")+
+  scale_fill_manual(values=c("#BF3100","#558C8C"))+
+  theme_manuscript()+
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face="bold"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = 45,hjust=1))+
+  guides(fill="none")
+
+pdf(paste0(dir.out.plots,"EFig3b.pdf"),height=4.5,width=3)
+plot.eFig3b
+dev.off()
+
+```
+

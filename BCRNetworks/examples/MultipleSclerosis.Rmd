@@ -1,0 +1,110 @@
+---
+title: "Multiple sclerosis dataset"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+# this script filters the AIRR sequencing multiple sclerosis dataset
+
+rm(list=ls())
+library(data.table)
+library(rjson)
+
+# dir.base should point to the location of the main project directory 
+dir.base <- "~/BCR-Immunosurveillance/"
+source (paste0(dir.base,"R/loadData.R"))
+source (paste0(dir.base,"BCRNetworks/R/ProcessBCR.R"))
+source (paste0(dir.base,"BCRNetworks/R/CreateNetwork.R"))
+
+workingDirectory <- "/Users/ssammut/temp/MRDARCY/MultipleSclerosis/"
+```
+
+
+```{r}
+
+# prepare the data:
+# cut -f1,2,6,7,8,10,29-42,145,146,150,151,152 vdjserver.tsv > vdjserver_colsTrimmed.tsv
+
+# load the entire dataset
+x <- fread("~/Dropbox/Stephen/Work/Research/datasets/BCR-data/Multiple-Sclerosis/vdjserver_colsTrimmed.tsv.gz")
+dim(x)
+
+#remove sequences with a consensus count lower than 3
+x <- x[x$consensus_count>2,]
+x <- x[x$locus=="IGH",]
+x <- x[x$cdr3!="",]
+dim(x)
+
+#load metadata
+md <- fromJSON(file="~/Dropbox/Stephen/Work/Research/datasets/BCR-data/Multiple-Sclerosis/vdjserver-metadata.json")
+
+meta <- character()
+for (z in c(1:32)){
+  meta <- rbind(meta, cbind(id=md$Repertoire[[z]]$repertoire_id, sample_id=md$Repertoire[[z]]$sample[[1]]$sample_id))
+}
+
+meta <- data.frame(meta)
+meta$sample_id <- gsub(" ","-",gsub(" section ", "",meta$sample_id))
+
+y <- merge(x,meta,by.x="repertoire_id",by.y="id")
+y$c_call<-"IGHA1"
+y$sequence <- gsub("-","",gsub("\\.","",paste0(y$fwr1,y$cdr1,y$fwr2,y$cdr2,y$fwr3,y$cdr3,y$fwr4)))
+y$donor_id<-substring(y$sample_id,1,2)
+
+y <- data.frame(y,stringsAsFactors = F)
+y <- y[, colnames(y) %in% c("sample_id","sequence","c_call","duplicate_count","donor_id")]
+y <- data.table(y)
+y <- y[,sum(duplicate_count),by=.(sequence,c_call,sample_id,donor_id)]
+y <- y[,c(1,2,5,3,4)]
+colnames(y)[3]<-"count"
+
+y <- data.frame(y,stringsAsFactors = F)
+
+#must be fullwd
+dirs <- initialiseDirs(workingDirectory)
+
+# STEP 1: create IMGT input
+createImgtInput(y, dirs)
+```
+
+
+
+```{r process-mrdarcy}
+
+# STEP 2: When IMGT process is complete download the output files into dir.mrdarcy.bcr.input.postimgt
+MrDarcyPath <- paste0(dir.base,"/BCRNetworks/MRDARCY_2.2ICR.py")
+condaPath   <- "/Users/ssammut/miniconda3/bin/conda"
+
+dirs <- initialiseDirs(workingDirectory)
+processIMGToutput(dirs)
+runMrDarcy(dirs,condaPath,MrDarcyPath)
+```
+
+
+```{r run-centrality}
+
+#STEP 3: Run centrality analyses
+
+filter.numSamples <- 2
+filter.numSequences <- 10
+plotGraph <- F
+
+metadata <- fread(paste0(dirs$dir.base,"/metadata-mrdarcy.txt"),header = F)
+metadata <- data.frame(metadata[,c(2,2)])
+colnames(metadata) <- c("sample_id","label")
+metadata$label <- sapply(strsplit(metadata$label,"-"),"[",2)
+metadata$colour <- NA
+runCentralityAnalysis(dirs,filter.numSamples, filter.numSequences, plotGraph, metadata)
+
+workingDirectory <- "/Users/ssammut/B-cell_immunosurveillance_breast_cancer/data/processed/MrDarcy/external-datasets/MultipleSclerosis/"
+file.bcr.degree <- paste0(workingDirectory, "Network-degree.RData")
+r <- readRDS(file.bcr.degree)
+r <- lapply(r, function(x) x[,colnames(x)!="bcr"])
+saveRDS(r, paste0(dir.out.data,"/centrality/Network.MS.RData"))
+
+```
+
+

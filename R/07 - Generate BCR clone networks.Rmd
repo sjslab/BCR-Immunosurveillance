@@ -1,0 +1,729 @@
+---
+title: "Generate BCR clone networks"
+author: "Stephen-John Sammut"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+Identifies immununosurveilling clones
+
+
+```{r load-data}
+
+rm(list=ls())
+library (caret)
+library (ggforce)
+library (seqinr)
+library (tidyr)
+library (viridis)
+
+dir.base <- "~/BCR-Immunosurveillance/"
+source (paste0(dir.base,"R/loadData.R"))
+
+#These scripts run the BCR centrality analyses
+source (paste0(dir.base,"BCRNetworks/R/ProcessBCR.R"))
+source (paste0(dir.base,"BCRNetworks/R/CreateNetwork.R"))
+
+dir.centrality <-paste0(dir.out.data,"centrality/")
+
+file.centrality.metastatic <- paste0(dir.centrality,"Network.breast-metastatic.RData")
+file.centrality.early <- paste0(dir.centrality,"Network.breast-early.RData")
+
+```
+
+```{r run-centrality-metastatic, eval=F}
+
+# This section generates BCR network plots and network degree statistics
+# Pre-computed degree statistics have been included in the 
+# BCR-networks-degree.RData file in the /output/data/centrality folder
+
+# MUST BE FULL ABSOLUTE PATH AND NOT HAVE SPACES
+workingDirectory <- "/Users/ssammut/temp/MRDARCY/metastatic/"
+dirs <- initialiseDirs(workingDirectory)
+
+filter.numSamples   <- 2
+filter.numSequences <- 10
+plotGraph <- F
+
+metadata <- metadata.mets[grepl(paste(donors,collapse="|"),metadata.mets$Sample.ID),]
+colnames(metadata) <- c("sample_id","label")
+
+metadata$colour <- c('#b2df8a','#33a02c',
+                     '#a6cee3','#1f78b4', "blue",
+                     '#fb9a99','#e31a1c',
+                     '#fdbf6f','#ff7f00',
+                     
+                     '#b2df8a','#33a02c','green',
+                     '#fdbf6f','#a6cee3','#1f78b4',
+                     '#ff7f00',"goldenrod",
+                     'blue','red',
+                     'grey','black','pink','red')
+
+runCentralityAnalysis(dirs,filter.numSamples, filter.numSequences, plotGraph, metadata)
+file <- paste0(workingDirectory, "Network-degree.RData")
+file.copy(from = file, to = file.centrality.metastatic)
+
+```
+
+
+```{r run-centrality-early, eval=F}
+
+workingDirectory <- "/Users/ssammut/temp/MRDARCY/neoadjuvant/"
+dirs <- initialiseDirs(workingDirectory)
+
+filter.numSamples   <- 2
+filter.numSequences <- 10
+
+metadata <- fread(paste0(dirs$dir.base,"/metadata-mrdarcy.txt"),header = F)
+metadata <- data.frame(metadata[,c(2,2)])
+colnames(metadata)<-c("sample_id","label")
+metadata$label <- sapply(strsplit(metadata$label,"-"),"[",2)
+metadata$colour <- NA
+runCentralityAnalysis(dirs,filter.numSamples, filter.numSequences, F, metadata)
+
+file <- paste0(workingDirectory, "Network-degree.RData")
+file.copy(from = file, to = file.centrality.early)
+```
+
+
+```{r LN-degree-centrality}
+
+# The majority of lymph node BCRs had a degree centrality of one compared to other metastatic sites (Fig. 4c), indicating that lymph nodes are key sites of clonal diversification where exploratory variants are generated. Conversely, non-lymph node sites had a higher proportion of BCRs with degree centrality greater than one, indicating that these BCRs are predominantly variants of expanded clones under significant selection (i.e. non-exploratory variants). 
+
+# Load BCR degree statistics
+bcrDegrees  <- readRDS(file.centrality.metastatic)
+
+# What proportion of BCRs have a degree of 1?
+bcrProportions<-list()
+for (d in names(bcrDegrees)){
+  s <- data.table(bcrDegrees[[d]])
+  s <- s[,!colnames(s) %in% c("bcr","bcrID","numSites","clusterIndex"),with=F]
+  s$degree[s$degree>1]<-">1"
+  s <- s[, lapply(.SD,sum), by=.(degree)]
+  
+  propBCRs <- data.frame(apply(s[,c(2:ncol(s)),with=F],2,function(x) prop.table(x)))
+  propBCRs$degree<-as.factor(s$degree)
+  
+  propBCRs <- reshape2::melt(propBCRs,id.vars=c("degree"))
+  propBCRs$variable <- gsub("\\.","-",as.character(propBCRs$variable))
+  propBCRs <- merge(propBCRs,metadata.mets,by.x="variable",by.y="Sample.ID")
+  propBCRs$degree<-as.character(propBCRs$degree)
+  bcrProportions[[d]]<-propBCRs
+}
+
+m <- do.call(rbind,bcrProportions)
+m$donor <- substring(m$variable,1,4)
+m[m$Disease.site!="Lymph node","Disease.site"] <- "Other sites"
+m$facet <- ifelse(m$degree=="1","Centrality=1","Centrality>1")
+
+# plot data for case E315 as this has both LN and non-LN sites
+plot.Fig4c_1 <- 
+  ggplot(m[m$donor=="E315" & m$facet=="Centrality=1",],
+         aes(x=Disease.site,y=value*100,fill= Disease.site))+
+  geom_boxplot(outlier.size = 0.5,width=0.8)+
+  geom_point(size=0.5)+
+  labs(x="Site",y="% analysed BCRs with degree centrality 1")+
+  stat_compare_means(label="p.format",method = "t.test")+
+  scale_fill_manual(values=c("#ff7f00","gray80"))+
+  theme_manuscript()+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        panel.grid.major.x = element_blank())+
+  theme(strip.background = element_blank(),
+        axis.title.x = element_blank())+
+  guides(fill="none")
+plot.Fig4c_1
+
+s <- data.table(bcrDegrees[["E315"]])
+s <- s[,!colnames(s) %in% c("bcr","bcrID","numSites"),with=F]
+
+s <- melt(s,measure.vars = grep("^E",colnames(s),value = T))
+s$variable <- gsub("\\.","-",as.character(s$variable))
+s <- merge(s,metadata.mets,by.x="variable",by.y="Sample.ID")
+s <- s[s$value!=0,]
+plot.Fig4c_2 <- ggplot(s,aes(x=Disease.site,y=log2(degree),fill=Disease.site))+
+  geom_boxplot(outlier.size = 0.5,width=0.8)+
+  labs(x="",y="BCR degree centrality (log2)")+
+  stat_compare_means(method = "aov")+
+  scale_fill_manual(values=cols.organ)+
+  theme_manuscript()+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        panel.grid.major.x = element_blank(),
+        strip.background = element_blank(),
+        axis.title.x = element_blank())+
+  guides(fill="none")
+
+pdf(paste0(dir.out.plots,"Fig4c.pdf"),height=7/2.54,width=10/2.54)
+ggarrange(plot.Fig4c_1,plot.Fig4c_2,widths=c(0.4,0.5))
+dev.off()
+
+rm(plot.Fig4c_1,plot.Fig4c_2,m, s, bcrProportions,bcrDegrees, propBCRs)
+```
+
+
+```{r network-degree-centrality-analysis}
+
+# BCR degree centrality was strongly correlated with the number of sites in which the BCR was observed 
+
+# This function loads and collapses BCR files
+collapseDegreeFile <- function(degree.all){
+  degreeList <- list()
+  for (d in names(degree.all)){
+    x <- degree.all[[d]]
+    x$case <-d
+    colsToKeep <- c("numSites","degree","clusterIndex","bcrID","case")
+    degreeList[[d]] <- x[,colnames(x) %in% colsToKeep]
+  }
+  p <- do.call(rbind,degreeList)
+  p$numSites <- as.character(p$numSites)
+  p
+}
+
+# Load BCR degree statistics
+degree.metastatic  <- readRDS(file.centrality.metastatic)
+degree.metastatic <- collapseDegreeFile(degree.metastatic)
+
+degree.early <- readRDS(file.centrality.early)
+degree.early <- collapseDegreeFile(degree.early)
+
+colours <- viridis(11, option = "D")[3:11]
+
+plot.Fig4e_1 <- ggplot(degree.metastatic,aes(y=log2(degree),x=numSites,fill=numSites))+
+  geom_boxplot(outlier.size = 0.5)+
+  labs(y="Log2 BCR degree centrality",
+       x="Number of metastatic samples BCR sequence detected in")+
+  facet_row(~case,scales="free_x",space="free")+
+  theme_manuscript(base_size = 12)+
+  stat_compare_means(label  ="p.format")+
+  guides(fill="none")+
+  scale_fill_manual(values = colours)+
+  theme(panel.grid.major.x = element_blank(),
+        strip.background = element_blank())
+
+plot.Fig4e_2 <- ggplot(degree.early,aes(y=log2(degree),x=numSites,fill=numSites))+
+  geom_boxplot(outlier.size = 0.5)+
+  labs(y="Log2 BCR degree centrality",
+       x="Number of time-points BCR sequence detected in")+
+  facet_row(~case,scales="free_x",space="free")+
+  theme_manuscript(base_size = 12)+
+  stat_compare_means(label  ="p.format")+
+  guides(fill="none")+
+  scale_fill_manual(values = colours)+
+  theme(panel.grid.major.x = element_blank(),
+        strip.background = element_blank())
+
+
+# Plot degree centrality 
+pdf(paste0(dir.out.plots,"Fig4e.pdf"),height=14/2.54,width=19/2.54)
+ggarrange(plot.Fig4e_1,plot.Fig4e_2,nrow=2)
+dev.off()
+
+rm(plot.Fig4e_1,plot.Fig4e_2)
+```
+
+
+```{r pathogen-screen}
+
+# The increased degree signature was not associated with systemic responses
+# against non-cancer antigen 
+
+# Load results from pathogen antigen screen
+screenRes <- readRDS(paste0(dir.out.data,"Ab-screen-Pathogen.Rdata"))
+screenRes.early <- screenRes$early
+screenRes.mets  <- screenRes$metastatic
+rm(screenRes)
+
+meltedDegreeList.metastatic <- list()
+for (d in unique(degree.metastatic$case)){
+  x <- degree.metastatic[degree.metastatic$case==d,]
+  x <- x[,c("degree","bcrID")]
+  g <- unnest(x, cols = bcrID)
+  g <- unnest(g, cols = bcrID)
+  f <- paste0(dir.mrdarcy.bcr.mets,"output/",d,"/Merge_clustering_",d,
+              ".txt.gz")
+  p <- data.frame(fread(f, head=TRUE, sep="\t"),stringsAsFactors = F)
+  colnames(p)[1] <- c("Cluster_ID")
+  p$SeqID <- sapply(strsplit(p$Sequence_ID,"\\|"),"[",1)
+  p <- merge(p,g,by.x="SeqID",by.y="bcrID")
+  meltedDegreeList.metastatic[[d]] <- p
+}
+degreeSeq.metastatic <- do.call(rbind, meltedDegreeList.metastatic)
+
+meltedDegreeList.early <- list()
+for (d in unique(degree.early$case)){
+  x <- degree.early[degree.early$case==d,]
+  x <- x[,c("degree","bcrID")]
+  g <- unnest(x, cols = bcrID)
+  g <- unnest(g, cols = bcrID)
+  f <- paste0(dir.mrdarcy.bcr.early,"output/",d,"/Merge_clustering_",d,
+              ".txt.gz")
+  p <- data.frame(fread(f, head=TRUE, sep="\t"),stringsAsFactors = F)
+  colnames(p)[1] <- c("Cluster_ID")
+  p$SeqID <- sapply(strsplit(p$Sequence_ID,"\\|"),"[",1)
+  p <- merge(p,g,by.x="SeqID",by.y="bcrID")
+  meltedDegreeList.early[[d]] <- p
+}
+degreeSeq.early <- do.call(rbind, meltedDegreeList.early)
+
+
+# Early breast cancer
+db.cancer <- readRDS(paste0(dir.out.data,"SequenceIDs_CDR3_match.early.RData"))
+statsList.early <- list()
+for (diff in c(2:3)){
+  r <- screenRes.early[screenRes.early$difference<=diff,]
+  # which BCR sequences have an overlap?
+  bcrsWithPathogenCDR3 <- unique(db.cancer[db.cancer$cdr3_seq %in% r$screen_seq,]$sequence_id)
+  f <- degreeSeq.early
+  f$isViral <- f$SeqID %in% bcrsWithPathogenCDR3
+  f$degreeB <- ifelse(f$degree >1,">1","1")
+  d <- reshape2::dcast(f,Sample_ID+degreeB~isViral, value.var = "isViral")
+  d$prop <- d$`TRUE`/(d$`FALSE`+d$`TRUE`)
+  colnames(d) <- c("sample","degree","NumNonViral","NumViral","PropViral")
+  d$class <- paste0("<=",diff," mismatches")
+  statsList.early[[as.character(diff)]]<-d
+}
+
+
+db.cancer <- readRDS(paste0(dir.out.data,"SequenceIDs_CDR3_match.metastatic.RData"))
+statsList.mets <- list()
+for (diff in c(2:3)){
+  r <- screenRes.mets[screenRes.mets$difference<=diff,]
+  # which BCR sequences have an overlap?
+  bcrsWithPathogenCDR3 <- unique(db.cancer[db.cancer$cdr3_seq %in% r$screen_seq,]$sequence_id)
+  f <- degreeSeq.metastatic
+  f$isViral <- f$SeqID %in% bcrsWithPathogenCDR3
+  f$degreeB <- ifelse(f$degree >1,">1","1")
+  d <- reshape2::dcast(f,Sample_ID+degreeB~isViral, value.var = "isViral")
+  d$prop <- d$`TRUE`/(d$`FALSE`+d$`TRUE`)
+  colnames(d) <- c("sample","degree","NumNonViral","NumViral","PropViral")
+  d$class <- paste0("<=",diff," mismatches")
+  statsList.mets[[as.character(diff)]]<-d
+}
+
+
+x1 <- cbind(rbindlist(statsList.mets), cohort="Metastatic BC")
+x2 <- cbind(rbindlist(statsList.early), cohort="Early BC")
+x <- rbind(x1,x2)
+x$class <- factor(x$class,levels=c("<=3 mismatches","<=2 mismatches"))
+x$freqClass <- factor(x$freqClass,levels=c("C","D","A","B"),ordered = T)
+x$degree<-factor(x$degree,levels=c("1",">1"))
+
+
+pdf(paste0(dir.out.plots,"EFig5d.pdf"),height=9/2.54,width=11/2.54)
+
+plot.EFig5d <- ggplot(x,aes(x=degree,y=PropViral,fill=degree))+
+  geom_boxplot(outlier.size = 0.5,width=0.8)+
+  stat_compare_means(label="p.format")+
+  labs(x="Degree",y="Proportion of BCRs/sample associated\nwith viral and bacterial antigens")+
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))+
+  scale_fill_manual(values=c("steelblue","tomato"))+
+  facet_grid(cohort~class,scales="free")+
+  theme_manuscript(base_size = 12)+
+  theme(strip.background = element_blank())+
+  guides(fill="none")
+plot.EFig5d
+dev.off()
+
+rm(d,db.cancer,degreeSeq.early,degreeSeq.metastatic,f, g, p,
+   meltedDegreeList.early, meltedDegreeList.metastatic, r,
+   screenRes.mets,screenRes.early,x1,x2,x)
+
+```
+
+
+
+```{r network-shm-analysis}
+
+# BCR degree centrality was independent of BCR mutation frequency (Extended Data Fig. 5e), showing that immunosurveilling BCRs are not the most mutated versions of these clones, but rather represent local optima of the clonal response to its antigen. 
+
+# metastatic breast cancer
+fa <- paste0(dir.mrdarcy.bcr.mets,"IMGT/input/AllSequences.fasta.gz")
+fa <- seqinr:::read.fasta(fa,seqtype = "DNA", as.string = T,forceDNAtolower = F)
+fa <- as.data.frame(do.call(rbind,fa),stringsAsFactors = F)
+fa$seqID <- rownames(fa)
+
+bcr <- readRDS(file$bcr.counts.mets)
+bcr <- do.call(rbind,bcr)
+bcr$seq <- getVDJSequence(bcr)
+bcr <- bcr[,c("seq","mu_count_total")]
+bcr <- bcr[!duplicated(bcr),]
+b   <- data.frame(merge(bcr,fa,by.x="seq",by.y="V1"),stringsAsFactors = F)
+b$seq <- NULL
+
+degreeDf <- degree.metastatic
+degreeDf$bcr <- NULL
+
+f1 <- degreeDf[lapply(degreeDf$bcrID, length)==1,]
+f1$bcrID <- as.character(unlist(f1$bcrID))
+f1 <- merge(f1, b, by.x="bcrID", by.y="seqID")
+colnames(f1)[6] <- "medianSHM"
+
+f2 <- degreeDf[lapply(degreeDf$bcrID, length)!=1,]
+for (x in c(1:nrow(f2))){
+  f2$medianSHM[x] <- median(b[b$seqID %in%
+                                as.character(unlist(f2$bcrID[x])),]$mu_count_total)
+}
+
+f.metastatic <- rbind(f1,f2)
+f.metastatic$cohort <- "Metastatic BC"
+
+# early breast cancer
+fa <- paste0(dir.mrdarcy.bcr.early,"IMGT/input/AllSequences.fasta.gz")
+fa <- seqinr:::read.fasta(fa,seqtype = "DNA", as.string = T,forceDNAtolower = F)
+fa <- as.data.frame(do.call(rbind,fa),stringsAsFactors = F)
+fa$seqID <- rownames(fa)
+
+bcr <- readRDS(file$bcr.counts.early)
+bcr <- do.call(rbind,bcr)
+bcr$seq <- getVDJSequence(bcr)
+bcr <- bcr[,c("seq","mu_count_total")]
+bcr <- bcr[!duplicated(bcr),]
+b   <- data.frame(merge(bcr,fa,by.x="seq",by.y="V1"),stringsAsFactors = F)
+b$seq <- NULL
+
+degreeDf <- degree.early
+degreeDf$bcr <- NULL
+
+f1 <- degreeDf[lapply(degreeDf$bcrID, length)==1,]
+f1$bcrID <- as.character(unlist(f1$bcrID))
+f1 <- merge(f1, b, by.x="bcrID", by.y="seqID")
+colnames(f1)[6] <- "medianSHM"
+
+f2 <- degreeDf[lapply(degreeDf$bcrID, length)!=1,]
+for (x in c(1:nrow(f2))){
+  f2$medianSHM[x] <- median(b[b$seqID %in%
+                                as.character(unlist(f2$bcrID[x])),]$mu_count_total)
+}
+
+f.early <- rbind(f1,f2)
+f.early$cohort <- "Early BC"
+
+
+f <- rbind(f.early,f.metastatic)
+
+plot.EFig5e <- ggplot(f,aes(y=log2(degree),x=medianSHM))+
+  geom_point(size=0.8)+
+  geom_smooth(method="lm", formula = y~x, se = T)+
+  labs(x="BCR SHM",y="Log2 BCR degree centrality")+
+  stat_p_eq+
+  facet_grid(~cohort)+
+  theme_manuscript(base_size = 12)+
+  theme(strip.background = element_blank())
+plot.EFig5e
+
+ggarrange(plot.EFig5d,plot.EFig5e)
+rm(b, bcr, degreeDf,f,f1,f2,fa)
+```
+
+
+
+```{r centrality-vs-dupcount}
+
+degreeList <- list()
+
+for (cohort in c("metastatic","early")){
+  if (cohort == "metastatic") {
+    degree.all <- readRDS(file.centrality.metastatic)
+    mrd <- dir.mrdarcy.bcr.mets
+  } else {
+    degree.all <- readRDS(file.centrality.early)
+    mrd <- dir.mrdarcy.bcr.early
+  }
+  for (d in names(degree.all)){
+    x <- degree.all[[d]]
+    x$case <-d
+    colsToKeep <- c("bcr","numSites","degree","clusterIndex","bcrID","case")
+    l <- x[,colnames(x) %in% colsToKeep]
+    
+    # add duplicate count
+    fastas <- paste0(mrd, "/output/",d,"/Combined_fully_reduced_A_sequences_",d,".fasta.gz")
+    masterFasta <- Biostrings::readDNAStringSet(fastas)
+    n=names(masterFasta)
+    
+    id1 <- sapply(strsplit(n,"\\|"),"[",1)
+    seqID  <- sapply(strsplit(id1,"__"),"[",1)
+    counts <- strsplit(sapply(strsplit(id1,"__"),"[",2),"_")
+    counts <- data.frame(do.call(rbind,counts),stringsAsFactors = F)
+    counts <- rowSums(data.frame(apply(counts, 2, function(x) as.numeric(as.character(x)))))
+    t=data.table(id=seqID,counts=counts)
+    
+    t=t[, lapply(.SD, sum), by = id, .SDcols = c("counts")]
+    t=data.frame(t)
+    l$count<-0
+    for (r in c(1:nrow(l))){
+      l[r,"count"]<-sum(t[t$id %in% as.character(unlist(l[r,"bcrID"])),"counts"])
+    }
+    degreeList[[d]]<-l
+  }
+}
+
+degreeDf <- do.call(rbind,degreeList)
+
+p <- degreeDf
+p$bcr<-NULL
+rownames(p)<-c(1:nrow(p))
+head(p)
+
+case <- aggregate(x=p,count~case,FUN="sum")
+head(case)
+
+for (d in unique(p$case)){
+  p[p$case==d,"count"]=p[p$case==d,"count"]/case[case==d,"count"]
+}
+
+p$cohort <- ifelse(grepl("T",p$case),"Early BC ","Metastatic BC")
+
+plot.EFig5f <- ggplot(p,aes(x=log2(count),y=log2(degree)))+
+  geom_point(size=0.5)+
+  labs(x="Log2 Proportion of total repertoire",y="Log2 Degree")+
+  stat_smooth(method = "lm", formula = y ~ poly(x, 2),se=T,size=0.5)+
+  facet_grid(~cohort)+
+  theme_manuscript(base_size = 12)+
+  theme(strip.background = element_blank())
+
+pdf(paste0(dir.out.plots,"EFig5def.pdf"),height=9/2.54,width=33/2.54)
+ggarrange(plot.EFig5d,plot.EFig5e,plot.EFig5f,nrow=1,widths = c(0.85,1,1))
+dev.off()
+
+mat=p
+cases = sort(unique(mat[,"case"]))
+for(c in c(1:length(cases))){
+  w = which(mat[,"case"]==cases[c])
+  x11 = log(mat[w,"count"])
+  y11= log(mat[w,"degree"])
+  fit1 <- lm( y11~poly(x11,2))
+  print(summary.lm(fit1))
+}
+
+mat=p
+cases = sort(unique(mat[,"cohort"]))
+for(c in c(1:length(cases))){
+  w = which(mat[,"cohort"]==cases[c])
+  x11 = log(mat[w,"count"])
+  y11= log(mat[w,"degree"])
+  fit1 <- lm( y11~poly(x11,2))
+  print(summary.lm(fit1))
+}
+
+```
+
+
+```{r centrality-validate}
+
+collapseDegreeFile <- function(degree.all){
+  degreeList <- list()
+  for (d in names(degree.all)){
+    x <- degree.all[[d]]
+    x$case <-d
+    colsToKeep <- c("numSites","degree","clusterIndex","bcrID","case")
+    degreeList[[d]] <- x[,colnames(x) %in% colsToKeep]
+  }
+  p <- do.call(rbind,degreeList)
+  p$numSites <- as.character(p$numSites)
+  
+  # remove sites with fewer than 3 BCRs
+  t <- table(p$case,p$numSites)
+  w <- which(t<3, arr.ind = T)
+  x <- p
+  if (nrow(w)!=0){
+    for (z in c(1:nrow(w))){
+      x <- x[!(x$case==rownames(t)[w[z,][1]] & x$numSites == colnames(t)[w[z,][2]]),]
+    }
+    x <- x[x$case %in% names(which(apply(table(x$case,x$numSites),1,
+                                         function(x) sum(x!=0))>1)),]
+  }
+  x
+  
+}
+
+# Validate degree centrality observation in Hartwig Medical Foundation Data
+cent.hartwig <- readRDS(paste0(dir.centrality,"Network.hartwig.RData"))
+cent.hartwig <- collapseDegreeFile(cent.hartwig)
+
+cent.phs <- readRDS(paste0(dir.centrality,"Network.phs000676.RData"))
+cent.phs <- collapseDegreeFile(cent.phs)
+
+cent.dm <- readRDS(paste0(dir.centrality,"Network.DM.RData"))
+cent.dm <- collapseDegreeFile(cent.dm)
+cent.dm2 <- readRDS(paste0(dir.centrality,"Network.DM-control.RData"))
+cent.dm2 <- collapseDegreeFile(cent.dm2)
+cent.dm <- rbind(cent.dm,cent.dm2)
+
+cent.ms <- readRDS(paste0(dir.centrality,"Network.MS.RData"))
+cent.ms <- collapseDegreeFile(cent.ms)
+
+x <- rbind(cbind(cent.hartwig, class="Breast cancer\nPriestley et al, 2019"),
+           cbind(cent.phs,class="Breast cancer\nSiegel et al, 2018"),
+           cbind(cent.dm,class="Diabetes mellitus\nSeay et al, 2016"),
+           cbind(cent.ms,class="Multiple sclerosis\nStern et al, 2014"))
+
+plot.EFig5i <- ggplot(x,aes(x=numSites, y=log2(degree), fill=numSites))+
+  geom_boxplot(outlier.size = 0.5)+
+  labs(y="Log2 BCR degree centrality",x="Number of samples BCR sequence detected in")+
+  theme_manuscript(base_size = 12)+
+  facet_grid(~class,scales="free",space = "free")+
+  stat_compare_means(label="p.format")+
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))+
+  guides(fill="none")+
+  scale_fill_manual(values = colours)+
+  theme(panel.grid.major.x = element_blank(),
+        strip.background = element_blank())
+plot.EFig5i
+
+pdf(paste0(dir.out.plots,"EFig5i.pdf"),height=7/2.54,width=18/2.54)
+plot.EFig5i
+dev.off()
+
+rm(cent.dm,cent.dm2,cent.hartwig,cent.ms,cent.phs,x)
+
+```
+
+
+
+
+```{r degree-classifier}
+
+getClassifierPerformanceMetrics <- function(f, numCentralityToCheck){
+  k <- list()
+  for (d in unique(f$case)){
+    m <- matrix(nrow=12,ncol=numCentralityToCheck)
+    for (centrality in c(1:numCentralityToCheck)){
+      
+      # select donor
+      x <- f[f$case==d,]
+      # classify BCR class, 1=immunosurveilling
+      x$class <- factor(ifelse(x$numSites>1,"1","0"))
+      # retain BCRs with degree 1 or have a centrality > centrality 
+      x <- x[x$degree==1 | x$degree>centrality,]
+      # classify centrality, 1=high centrality, 0=centality=1
+      x$centrality <- factor(ifelse(x$degree>centrality,"1","0"),levels = c("0","1"),ordered = T)
+      cm <- confusionMatrix(data=x$centrality,reference = x$class,positive = "1")
+      m[,centrality]<-c(cm$byClass,cm$overall["Accuracy"])
+    }
+    rownames(m) <- c(names(cm$byClass),"Accuracy")
+    colnames(m) <- c(1:numCentralityToCheck)
+    m <- m[!rownames(m) %in% c("Detection Rate","Detection Prevalence","Prevalence","Recall","Precision"),]
+    k[[d]] <- m
+  }
+  k
+}
+
+
+numCentralityToCheck <- 10
+classifier.early <- getClassifierPerformanceMetrics(degree.early,numCentralityToCheck)
+classifier.metastatic <- getClassifierPerformanceMetrics(degree.metastatic,numCentralityToCheck)
+
+createDf <- function(x, donor){
+  a <- data.frame(t(x))
+  a$donor <- donor
+  a$iteration <- as.numeric(rownames(a))
+  a
+}
+
+x<-data.frame()
+for (i in c(1:length(classifier.early))){
+  x <- rbind(x,createDf(classifier.early[[i]], names(classifier.early)[i]))
+}
+for (i in c(1:length(classifier.metastatic))){
+  x <- rbind(x,createDf(classifier.metastatic[[i]], names(classifier.metastatic)[i]))
+}
+
+
+b <- reshape2::melt(x,id.vars=c("donor","iteration"))
+b <- b[!b$variable %in% c("Balanced.Accuracy","Pos.Pred.Value","Neg.Pred.Value","F1"),]
+
+plot.EFig5g <- ggplot(b,aes(x=iteration,y=value,group=donor,color=donor))+
+  geom_point(size=1)+
+  geom_path()+
+  labs(x="Centrality greater than",y="Value")+
+  theme_manuscript()+
+  # scale_color_manual(name="Donor",values=c("#FFAE03","#588B8B","#2176FF","#E9190F","#D56AA0"))+
+  scale_color_manual(name="Donor",values=c('#a6cee3','#1f78b4','#b2df8a','#33a02c','#fb9a99','#e31a1c','#fdbf6f','#ff7f00','#cab2d6','#6a3d9a','#ffff99','#b15928','gray50','black'))+
+  facet_wrap(~variable,scales="free")+
+  scale_x_continuous(breaks=c(1:10))+
+  theme(strip.background = element_blank(),
+        panel.grid.major.x = element_blank())
+
+plot.EFig5g
+
+pdf(paste0(dir.out.plots,"EFig5g.pdf"),height=10/2.54,width=19/2.54)
+plot.EFig5g
+dev.off()
+
+rm(classifier.early,classifier.metastatic)
+
+```
+
+
+
+
+```{r degree-classifier-collapsed}
+
+getClassifierPerformanceMetrics <- function(f, numCentralityToCheck){
+  m <- matrix(nrow=12,ncol=numCentralityToCheck)
+  for (centrality in c(1:numCentralityToCheck)){
+    x <- f
+    # classify BCR class, 1=immunosurveilling
+    x$class <- factor(ifelse(x$numSites>1,"1","0"))
+    # retain BCRs with degree 1 or have a centrality > centrality 
+    x <- x[x$degree==1 | x$degree>centrality,]
+    # classify centrality, 1=high centrality, 0=centality=1
+    x$centrality <- factor(ifelse(x$degree>centrality,"1","0"),levels = c("0","1"),ordered = T)
+    cm <- confusionMatrix(data=x$centrality,reference = x$class,positive = "1")
+    m[,centrality]<-c(cm$byClass,cm$overall["Accuracy"])
+  }
+  rownames(m) <- c(names(cm$byClass),"Accuracy")
+  colnames(m) <- c(1:numCentralityToCheck)
+  m <- m[!rownames(m) %in% c("Detection Rate","Detection Prevalence","Prevalence","Recall","Precision"),]
+  m
+}
+
+
+numCentralityToCheck <- 10
+classifier.early <- getClassifierPerformanceMetrics(degree.early,numCentralityToCheck)
+classifier.metastatic <- getClassifierPerformanceMetrics(degree.metastatic,numCentralityToCheck)
+classifier.all <- getClassifierPerformanceMetrics(rbind(degree.metastatic,degree.early), numCentralityToCheck)
+
+createDf <- function(x, donor){
+  a <- data.frame(t(x))
+  a$donor <- donor
+  a$iteration <- as.numeric(rownames(a))
+  a
+}
+
+x<-data.frame()
+x <- rbind(x,createDf(classifier.early, "Early BC cohort"))
+x <- rbind(x,createDf(classifier.metastatic, "Metastatic BC cohort"))
+x <- rbind(x,createDf(classifier.all, "All cohorts"))
+
+b <- reshape2::melt(x,id.vars=c("donor","iteration"))
+b <- b[!b$variable %in% c("Balanced.Accuracy","Pos.Pred.Value","Neg.Pred.Value","F1"),]
+
+plot.Fig4f <- ggplot(b,aes(x=iteration,y=value,group=donor,color=donor))+
+  geom_point(size=1)+
+  geom_path()+
+  labs(x="Centrality greater than",y="Value")+
+  theme_manuscript()+
+  # scale_color_manual(name="Donor",values=c("#FFAE03","#588B8B","#2176FF","#E9190F","#D56AA0"))+
+  scale_color_manual(name="Cohort",values=c("gray30",'#1f78b4','tomato'))+
+  facet_wrap(~variable,scales="free")+
+  scale_x_continuous(breaks=c(1:10))+
+  theme(strip.background = element_blank(),
+        panel.grid.major.x = element_blank())
+
+plot.Fig4f
+
+pdf(paste0(dir.out.plots,"Fig4f.pdf"),height=8/2.54,width=17/2.54)
+plot.Fig4f
+dev.off()
+
+rm(classifier.early,classifier.metastatic)
+
+```
+
+
+
+
+
+
+

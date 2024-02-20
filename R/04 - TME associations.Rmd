@@ -1,0 +1,305 @@
+---
+title: "Associations between tumour microenvironment components and activity (RNA-seq)"
+author: "Stephen John Sammut"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r load-data}
+rm(list=ls())
+
+library (corrplot)
+library (GGally)
+library (GSVA)
+library (pheatmap)
+
+# dir.base should point to the location of the main project directory 
+dir.base <- "~/BCR-Immunosurveillance/"
+source (paste0(dir.base,"R/loadData.R"))
+
+# TCGA files
+# Download from TCGA portal and change file path. This should be a matrix with gene names as rownames
+# and sample IDs as colnames
+# this file is not provided and must be
+file.expr.tcga <-  paste0(dir.resources,"TCGA-mRNA_fpkm_hugo.RData")
+
+# TCGA Danher enrichment scores
+# Downloaded from: https://jitc.biomedcentral.com/articles/10.1186/s40425-017-0215-8
+file.danaher.tcga <- paste0(dir.resources,"TCGA-danaher-immune-cells.csv.gz")
+
+
+```
+
+
+```{r danaher-TME-correlations}
+
+# Load immune TME components (Danaher) from metastatic breast cancer cohort
+danaher <- readRDS(file$rna.danaher)
+
+# Derive and plot correlation between TME components - Figure 2c
+k1 <- cor(danaher)
+k2 <- cor.mtest(danaher)
+
+cols <- c('white','#f7fcf0','#e0f3db','#ccebc5','#a8ddb5','#7bccc4','#4eb3d3',
+                 '#2b8cbe','#0868ac','#084081')
+                 
+pdf(paste0(dir.out.plots,"Fig2c_1.pdf"),height=2.6,width=2.6)
+corrplot(k1, p.mat = k2$p, method = 'circle', order = 'hclust', 
+         hclust.method="complete", col = c(cols,cols), col.lim = c(0,1), 
+         type = 'upper', diag=F, insig='blank', tl.col = 'black', tl.cex = 0.5,
+         cl.cex=0.4,tl.srt = 45, sig.level = 0.05)
+dev.off()
+
+# Plot scatterplot showing correlation between B and T cells - inset panel in Figure 2c
+pdf(paste0(dir.out.plots,"Fig2c_2.pdf"),height=0.82,width=0.84)
+ggplot(danaher,aes(x=`B-cells`,y=`T-cells`))+
+  geom_point(size=0.2)+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  labs(y="T cells",x="B cells")+
+  theme_bw(base_size = 6)+
+  theme(axis.text = element_text(colour="black"),
+        panel.grid = element_blank())
+dev.off()
+
+```
+
+```{r mcpcounter-TME-correlations}
+
+# Load immune TME components (MCPcounter) 
+mcp <- readRDS(file$rna.mcp)
+
+k1 <- cor(mcp)
+k2 <- cor.mtest(mcp)
+k1[k1<0 & k2$p>0.05] <- 0
+
+# Derive and plot correlation between TME components - EFigure 2b
+cairo_pdf(paste0(dir.out.plots,"EFig2b_ii.pdf"),height=3,width=3)
+corrplot(k1, p.mat = k2$p, method = 'circle', order = 'hclust', 
+         hclust.method="ward.D2", col = c(cols,cols), col.lim = c(0,1), 
+         type = 'upper', diag=F, insig='blank', tl.col = 'black', 
+         tl.cex = 0.5, cl.cex=0.4, tl.srt = 45, sig.level = 0.05)
+dev.off()
+
+
+# Plot scatterplot showing correlation between B and T cells - inset panel in EFigure 2b
+pdf(paste0(dir.out.plots,"EFig2b_i.pdf"),height=0.9,width=0.9)
+ggplot(data.frame(mcp),aes(y=`T.cells`,x=`B.lineage`))+
+  geom_point(size=0.2)+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  labs(y="T cell enrichment",x="B cell enrichment")+
+  theme_bw(base_size = 6)+
+  theme(axis.text = element_text(colour="black"),
+        panel.grid = element_blank())
+dev.off()
+
+
+```
+
+```{r B-T-cell-relationship-with-TLS}
+
+#Tertiary lymphoid structure analysis
+gene.tls.hallmark <- c("CCL19", "CCL21", "CXCL13", "CCR7", "CXCR5", "SELL", "LAMP3")
+
+ensToHugo <- fread(file$res.ensgToHugo)
+gene.tls.hallmark <- ensToHugo[ensToHugo$Hugo %in% gene.tls.hallmark,]$Ensembl.ID
+
+geneList<-list(`TLS Hallmark`=gene.tls.hallmark)
+
+tpm <- readRDS(file$rna.expr.tpm)
+tpm <- as.matrix(log2(tpm+1))
+
+h <- t(gsva(tpm,geneList,method="ssgsea"))
+
+d <- merge(danaher,h,by=0)
+d <- d[,colnames(d) %in% c("Row.names","B-cells","T-cells","TLS Hallmark")]
+d <- melt(d,id.vars=c("Row.names","TLS Hallmark"))
+
+pdf(paste0(dir.out.plots,"EFig2d.pdf"),height=3.5/2.54,width=6/2.54)
+ggplot(d,aes(x=value,y=`TLS Hallmark`))+
+    geom_point(size=0.2)+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  facet_grid(~variable,scales="free")+
+  labs(y="Tertiary lymphoid structure\nssGSEA score",x="Enrichment score")+
+  theme_manuscript(base_size = 6)+
+  theme(strip.background = element_blank())
+dev.off()
+
+```
+
+
+
+```{r TME-activity-composition-correlations}
+
+# Load Ensembl<->Hugo dictionary
+dictionary <- data.frame(fread(file$res.ensgToHugo),stringsAsFactors = F)
+
+# Gene lists
+
+# Cytolytic activity score genes
+genes.cyt <- c("GZMA", "PRF1")
+genes.cyt <- dictionary[dictionary$Hugo %in% genes.cyt, "Ensembl.ID"]
+
+# Interferon-γ score genes [PMID: 28650338]
+genes.ifng <- c("IFNG", "STAT1", "IDO1", "CXCL10", "CXCL9", "HLA-DRA")
+genes.ifng <- dictionary[dictionary$Hugo %in% genes.ifng, "Ensembl.ID"]
+
+# T cell inflamed score genes [PMID: 28650338]
+genes.inflamed <- c("TIGIT", "CD27", "CD8A", "PDCD1LG2", "LAG3", "CD274", 
+                    "CXCR6", "CMKLR1", "NKG7", "CCL5", "PSMB10", "IDO1", 
+                    "CXCL9", "HLA-DQA1", "CD276", "STAT1", "HLA-DRB1", "HLA-E")
+genes.inflamed <- dictionary[dictionary$Hugo %in% genes.inflamed, "Ensembl.ID"]
+
+# B cell activation score
+genes.Bcell <- readRDS(file$res.msigdb.c5)
+genes.Bcell <- genes.Bcell[names(genes.Bcell) == "GOBP_POSITIVE_REGULATION_OF_B_CELL_ACTIVATION"]
+
+
+# Load RNA TPM expression matrix
+tpmExpression <- readRDS(file$rna.expr.tpm)
+
+
+# Calculate cytolytic activity score
+# Geometric mean of GZMA and PRF1 (as expressed in TPM, 0.01 offset). 
+score.cyt  <- tpmExpression[rownames(tpmExpression) %in% genes.cyt,]
+score.cyt  <- data.frame(sample = colnames(score.cyt), 
+                         cytscore = log2(apply(t(score.cyt),1, function (x) exp(mean(log(x+0.01))))))
+rownames(score.cyt) <- c(1:nrow(score.cyt))
+
+
+#compute B cell activation score
+tpmExpression <- as.matrix(log2(tpmExpression+0.01))
+score.bCell <- data.frame(t(gsva(tpmExpression,genes.Bcell,method="ssgsea")))
+colnames(score.bCell) <- "B Cell activation"
+
+score.all <- merge(score.cyt, score.bCell,by.x=1,by.y=0)
+
+pdf(paste0(dir.out.plots,"EFig2c_1.pdf"),height=1,width=1)
+ggplot(score.all,aes(x=`B Cell activation`,y=cytscore))+
+  geom_point(size=0.2)+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  labs(x="B cell activation score", y="Log2 CYT score")+
+  theme_bw(base_size = 6)+
+  theme(axis.text = element_text(colour="black"),
+        panel.grid = element_blank())
+dev.off()
+
+
+#compute Interferon-γ and T cell inflamed scores
+score.ifng <- data.frame(`IFNG score` = log2(apply(t(tpmExpression[genes.ifng,]),
+                                                   1, function (x) 2^(mean(x)))))
+score.inflamed <- data.frame(`Inflamed score` = log2(apply(t(tpmExpression[genes.inflamed,]),
+                                                           1, function (x) 2^(mean(x)))))
+
+correlations <- data.frame('CYT score' =
+                             apply(danaher, 2, function(x) 
+                               cor.test(x,score.cyt$cytscore)$estimate),
+                           'IFNG score' =
+                             apply(danaher, 2, function(x) 
+                               cor.test(x,score.ifng$IFNG.score)$estimate),
+                           'Inflamed score' =
+                             apply(danaher, 2, function(x) 
+                               cor.test(x,score.inflamed$Inflamed.score)$estimate),
+                           'B cell activation score' =
+                             apply(danaher, 2, function(x)
+                               cor.test(x,score.bCell$`B Cell activation`)$estimate))
+
+
+p <- data.frame(cyt =
+                  apply(danaher, 2, function(x) cor.test(x,score.cyt$cytscore)$p.value),
+                ifng =
+                  apply(danaher, 2, function(x) cor.test(x,score.ifng$IFNG.score)$p.value),
+                inflamed =
+                  apply(danaher, 2, function(x) cor.test(x,score.inflamed$Inflamed.score)$p.value),
+                bcell =
+                  apply(danaher, 2, function(x) cor.test(x,score.bCell$`B Cell activation`)$p.value))
+
+
+p.abbrev <- apply(p,2, function(x) symnum(x,corr = FALSE, na = FALSE, 
+                                          cutpoints = c(0,     0.0001,0.001, 0.01, 0.05, 0.1,1), 
+                                          symbols =   c("****", "***", "**", "*",   " ", "  ")))
+
+# Plot heatmap showing correlations between immune TME composition and activation
+# EFig 2c
+pdf(paste0(dir.out.plots,"EFig2c_2.pdf"),height=12,width=6)
+pheatmap((correlations), display_numbers = (p.abbrev), fontsize = 12,color = cols,breaks = c(seq(0,1,by=0.1)),
+         fontsize_number = 13, scale = "none", treeheight_row = 16,
+         treeheight_col = 16, cellwidth = 25,cellheight = 25)
+dev.off()
+```
+
+```{r TCGA}
+
+#Load TCGA resource downloaded from GDC
+expr <- readRDS(file.expr.tcga)
+expr <- expr$primary
+
+#Load published danaher scores
+danaher    <- data.frame(fread(file.danaher.tcga),row.names = 1)
+danaher    <- danaher[gsub("\\.","-",substring(rownames(danaher),1,16)) %in% colnames(expr),]
+danaher <- danaher[,c("B.cells","T.cells")]
+
+gene.tls.hallmark <- c("CCL19", "CCL21", "CXCL13", "CCR7", "CXCR5", "SELL" , "LAMP3")
+
+geneList <- list(gene.tls.hallmark=gene.tls.hallmark)
+
+h <- apply(expr,1,function(x) all(x<1))
+toRemove <- names(h[h==T])
+expr <- expr[!rownames(expr) %in% toRemove,]
+dim(expr)
+
+h <- t(gsva(as.matrix(expr),geneList,method="ssgsea"))
+
+rownames(danaher)<-gsub("\\.","-",substring(rownames(danaher),1,16))
+danaher <- merge(danaher,h,by=0)
+danaher <- danaher[,c("B.cells","T.cells","gene.tls.hallmark")]
+colnames(danaher) <- c("B cells","T cells","TLS hallmark")
+
+#1083 TCGA tumours
+dim(danaher)
+
+# from: https://stackoverflow.com/questions/30858337/how-to-customize-lines-in-ggpairs-ggally
+lowerFn <- function(data, mapping, method = "lm", ...) {
+  p <- ggplot(data = data, mapping = mapping) +
+    geom_point(colour = "black",size=1) +
+    geom_smooth(method = method, color = "blue", ...)
+  p
+}
+
+# from https://stackoverflow.com/questions/67835644/how-can-i-remove-the-corr-text-from-the-correlation-matrix-done-with-ggally
+
+cor_func <- function(data, mapping, ...){
+  x <- eval_data_col(data, mapping$x)
+  y <- eval_data_col(data, mapping$y)
+  
+  l <- summary(lm(x~y))
+  l.r <- as.character(round(l$r.squared,2))
+  l.p <- as.character(round(l$coefficients["y","Pr(>|t|)"],2))
+  ggally_text(
+    label = paste0("R2=",l.r,"\nP=",l.p), 
+    mapping = aes(),
+    xP = 0.5, yP = 0.5,
+    color = 'black',
+    ...
+  )
+}
+
+pdf(paste0(dir.out.plots,"EFig2e.pdf"),height=13/2.54,width=13/2.54)
+ggpairs(danaher, lower = list(continuous = wrap(lowerFn, method = "lm")),
+        upper = list(continuous = wrap(cor_func)))+
+  theme_bw(base_size = 12)+
+  labs(x="TCGA ssGSEA score",y="TCGA ssGSEA score")+
+  theme(strip.background = element_blank(),
+        strip.text = element_text(color="black",size=12),
+        axis.text = element_text(color="black",size=12))
+dev.off()
+
+
+```
+
+

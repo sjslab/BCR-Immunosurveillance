@@ -1,0 +1,76 @@
+---
+title: "Neoadjuvant dataset"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+create neoadjuvant analysis
+
+```{r}
+# this script filters the early breast cancer dataset
+rm(list=ls())
+
+# dir.base should point to the location of the main project directory 
+dir.base <- "~/BCR-Immunosurveillance/"
+source (paste0(dir.base,"R/loadData.R"))
+source (paste0(dir.base,"BCRNetworks/R/ProcessBCR.R"))
+source (paste0(dir.base,"BCRNetworks/R/CreateNetwork.R"))
+
+# MUST BE FULL ABSOLUTE PATH AND NOT HAVE SPACES
+workingDirectory <- "/Users/ssammut/temp/MRDARCY/neoadjuvant/"
+
+```
+
+
+```{r}
+
+#prepare BCR data
+file.airr <- "~/Dropbox/Stephen/Work/Research/projects/BCR neoadjuvant/data-dedup/processed/bcr-data/BCR-sequencing-data.RData"
+
+x <- data.table::rbindlist(readRDS(file.airr))
+
+x$sequence <- gsub("-","",gsub("\\.","",paste0(x$cdr1,x$fwr2,x$cdr2,x$fwr3,x$cdr3,x$fwr4)))
+x<-x[nchar(x$sequence)>10,]
+
+KEEP<-colnames(x) %in% c("sample_id","sequence","c_call","duplicate_count","case_id")
+x<-x[, ..KEEP]
+
+colnames(x)[3]<-"count"
+colnames(x)[5]<-"donor_id"
+head(x,1)
+
+x<-x[!grepl("surgical",x$sample_id),]
+
+dirs <- initialiseDirs(workingDirectory)
+createImgtInput(x, dirs)
+```
+
+
+```{r process-mrdarcy}
+
+MrDarcyPath <- paste0(dir.base,"/BCRNetworks/MRDARCY_2.2ICR.py")
+condaPath <- "/Users/ssammut/miniconda3/bin/conda"
+
+processIMGToutput(dirs)
+runMrDarcy(dirs,condaPath,MrDarcyPath)
+```
+
+
+
+```{r run-centrality}
+filter.numSamples   <- 2
+filter.numSequences <- 10
+plotGraph <- F
+
+metadata <- fread(paste0(dirs$dir.base,"/metadata-mrdarcy.txt"),header = F)
+metadata <- data.frame(metadata[,c(2,2)])
+colnames(metadata)<-c("sample_id","label")
+metadata$label <- sapply(strsplit(metadata$label,"-"),"[",2)
+metadata$colour <- NA
+runCentralityAnalysis(dirs,filter.numSamples, filter.numSequences, plotGraph, metadata)
+
+file <- paste0(workingDirectory, "Network-degree.RData")
+file.copy(from = file, to= paste0(dir.resources,"centrality/Network.neoadjuvant.RData"))
+```
+

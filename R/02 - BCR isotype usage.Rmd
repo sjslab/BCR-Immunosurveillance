@@ -1,0 +1,274 @@
+---
+title: "BCR isotype usage analysis"
+author: "Stephen John Sammut"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+Plot BCR isotype usage distribution in metastatic breast cancer cohort and GTEx cohort.
+
+
+```{r load-data}
+
+rm(list=ls())
+
+library (ggrepel)
+library (pheatmap)
+library (RColorBrewer)
+library (rstatix)
+
+dir.base <- "~/BCR-Immunosurveillance/"
+source (paste0(dir.base,"R/loadData.R"))
+
+# Load metastatic breast cancer BCR counts file
+# This file can be provided once approval from the Data Access Committee is secured.
+bcrs <- readRDS(file$bcr.counts.mets)
+bcrs <- rbindlist(bcrs)
+bcrs <- bcrs[, c("c_call","sample_id")]
+
+# For GTEx analysis:
+
+# 1. Download GTEx data (1.5Gb) and metadata from: 
+# https://storage.googleapis.com/gtex_analysis_v8/rna_seq_data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct.gz
+# https://storage.googleapis.com/gtex_analysis_v8/annotations/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt
+
+# 2. Update the location gtexDir variable:
+#the following files should be present in this directory:
+# - GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct.gz
+# - GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt.gz
+
+gtexDir <- "~/Dropbox/Stephen/Work/Research/datasets/external/GTEX/v8/RNA/"
+list.files(gtexDir)
+
+
+
+```
+
+```{r BCR-isotype-usage}
+
+# Calculate BCR isotype proportion across samples
+# Returns a matrix of proportion/isotype/sample
+getIsotypeUsage <- function(d){
+  as.data.frame.matrix(prop.table(table(d$sample_id,d$c_call),margin = 1))
+}
+
+ig <- getIsotypeUsage(bcrs)
+ig <- merge(ig, metadata.mets.noAbbrev[,c("Sample.ID","Disease.site")],
+            by.x=0, by.y="Sample.ID")
+
+# Exclude group with less than two datapoints
+t <- table(ig$Disease.site)
+t
+ig <- ig[ig$Disease.site %in% names(t)[t>2],]
+ig$Disease.site[ig$Disease.site=="LN"]<-"Lymph nodes"
+
+# Melt ig dataframe and perform Kruskal-Wallis test
+igMelt <- reshape2::melt(ig)
+
+# Kruskal_test
+stat.test <- igMelt %>%
+  group_by(variable) %>%
+  kruskal_test(value~Disease.site) %>% 
+  adjust_pvalue(method="BH") %>%
+  add_significance()
+stat.test$label <- paste0(stat.test$variable,"\t",stat.test$p.adj.signif)
+
+
+# Plot isotype usage heatmaps (Fig 2a)
+x <- data.table(igMelt)
+x <- x[ ,list(mean=mean(value)), by=list(Disease.site, variable)]
+x <- merge(x,stat.test[,c("variable","p.adj","label")],by="variable")
+x <- data.frame(dcast(Disease.site~label,data = x,value.var = "mean"),row.names = 1)
+colnames(x) <- p$label
+
+cols <- c('#f7fcf0','#e0f3db','#ccebc5','#a8ddb5','#7bccc4',
+          '#4eb3d3','#2b8cbe','#0868ac','#084081')
+
+ph <- pheatmap(x, cluster_rows = 1, scale="none" ,treeheight_row = 6,
+               treeheight_col = 6, col=cols, border_color = "gray60",
+               fontsize = 6, cellwidth = 8,cellheight = 7,silent = T)
+plot.Fig2a <- ph$gtable
+
+cairo_pdf(paste0(dir.out.plots,"Fig2a.pdf"),height=2.2,width=3,onefile=T)
+print(ggarrange(plot.Fig2a))
+dev.off()
+
+# Plot boxplot equivalent (EFig 1b)
+
+# sort facets to be comparable to Fig 2a
+igMelt$variable <- factor(igMelt$variable, levels=c("IGHA1","IGHG1","IGHG2","IGHA2",
+                                                    "IGHM","IGHE","IGHG4","IGHD",
+                                                    "IGHG3"))
+plot.EFig1b <- ggplot(igMelt, aes(x=Disease.site,y=value,fill=Disease.site))+
+  geom_boxplot(outlier.size = 0.5)+
+  geom_point(size=0.6)+
+  facet_wrap(~variable,nrow=3)+
+  labs(x="",y="Proportion")+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  scale_fill_manual(name="Site",values = cols.organ)+
+  guides(fill="none")+
+  theme_manuscript()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        panel.grid.major.x = element_blank(),
+        strip.background = element_blank())
+
+pdf(paste0(dir.out.plots,"EFig1b.pdf"),height=7,width=5)
+plot.EFig1b
+dev.off()
+
+
+
+```
+
+
+The distribution of isotypes across metastatic sites was distinct from that observed in healthy normal tissues (using bulk transcriptomic data from the Genotype-Tissue Expression (GTEx) Consortium atlas.
+
+
+```{r load-gtex-data}
+
+file.expr.gtex    <- paste0(gtexDir,"GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct.gz")
+file.metadata.gtex <- paste0(gtexDir,"GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt.gz")
+
+
+# Load GTEx expression and metadata files
+expr.gtex     <- fread(file.expr.gtex)
+metadata.gtex <- fread(file.metadata.gtex)[,c("SAMPID","SMTS")]
+
+
+# Subset GTEx data, retaining only samples obtained from sites that have also
+# been sequenced within this study
+metadata.gtex <- metadata.gtex[metadata.gtex$SMTS %in%
+                                 c("Brain","Breast","Liver","Lung"),]
+expr.gtex     <- expr.gtex[,colnames(expr.gtex) %in% 
+                             c("Description",metadata.gtex$SAMPID),with=F]
+
+g           <- as.matrix(expr.gtex[,-1])
+rownames(g) <- expr.gtex$Description
+colnames(g) <- colnames(expr.gtex)[-1]
+expr.gtex   <- g
+rm(g)
+gc()
+
+metadata.gtex <- metadata.gtex[metadata.gtex$SAMPID %in% colnames(expr.gtex),]
+# n= Brain: 2642, Breast: 459, Liver: 226, Lung: 578 
+# total GTEx samples = 3,905 samples
+table(metadata.gtex$SMTS)
+nrow(metadata.gtex)
+
+# Subset GTEx data further, retain BCR isotypes only
+expr.iso <- expr.gtex[grepl("^IGHA1$|^IGHA2$|^IGHG1$|^IGHG2$|^IGHG3$|^IGHG4$|^IGHD$|^IGHM$|^IGHE$",
+                            rownames(expr.gtex)),]
+expr.iso <- data.frame(t(expr.iso))
+expr.iso <- expr.iso[,order(colnames(expr.iso))]
+
+expr.iso.prop <- as.data.frame(prop.table(as.matrix(expr.iso),margin = 1))
+stopifnot(sum(rownames(expr.iso.prop) != metadata.gtex$SAMPID)==0)
+expr.iso.prop$Disease.Site <- metadata.gtex$SMTS
+
+formulae <- lapply(colnames(expr.iso.prop)[1:c(ncol(expr.iso.prop)-1)], 
+                   function(x) as.formula(paste0(x, " ~ Disease.Site")))
+
+res      <- lapply(formulae, function(x) kruskal.test(x, data = expr.iso.prop))
+names(res) <- colnames(expr.iso.prop)[-ncol(expr.iso.prop)]
+p <- unlist(lapply(res, function(x) x$p.value))
+p <- data.frame(IGH = names(p),  pvalue = p)
+p$pvalue <- p.adjust(p$pvalue)
+p$abbrev <- symnum(p$pvalue,corr = FALSE, na = FALSE, 
+                   cutpoints = c(0,     0.0001,0.001, 0.01, 0.05, 0.1,1), 
+                   symbols =   c("****", "***", "**", "*",   " ", "  "))
+p$label<-paste0(p$IGH,"\t",p$abbrev)
+# Kruskal-Wallis P
+p
+
+
+##
+
+# Calculate mean BCR isotype expression per site
+expr.iso <- as.data.frame(prop.table(as.matrix(expr.iso),margin = 1))
+stopifnot(sum(rownames(expr.iso) != metadata.gtex$SAMPID)==0)
+expr.iso$Disease.Site <- metadata.gtex$SMTS
+
+o <- data.frame(aggregate(expr.iso[ ,-ncol(expr.iso)], 
+                          by = list(expr.iso$Disease.Site), FUN = mean), row.names = 1)
+stopifnot(sum(colnames(o)!=p$IGH)==0)
+colnames(o) <- p$label
+
+cols <- c('#f7fcf0','#e0f3db','#ccebc5','#a8ddb5','#7bccc4',
+          '#4eb3d3','#2b8cbe')
+plot.EFig1c <- 
+  pheatmap(o, cluster_rows = 1, scale="none", treeheight_row = 6,
+           treeheight_col = 6, col=cols, border_color = "gray60",fontsize = 6, 
+           cellwidth = 10, cellheight = 10, silent = T)
+cairo_pdf(paste0(dir.out.plots,"EFig1c.pdf"),height=2.2,width=3,onefile=T)
+plot.EFig1c
+dev.off()
+```
+
+
+```{r TCR-and-BCR-expression-comparison}
+
+# Load bulk RNA TPM expression data from the lethal metastatic breast cancer cohort
+expr.aut <- readRDS(file$rna.expr.tpm.mets)
+expr.aut <- as.matrix(expr.aut)
+
+# Load Ensembl<->Hugo dictionary
+dictionary <- fread(file$res.ensgToHugo)
+dictionary <- dictionary[match(rownames(expr.aut),dictionary$Ensembl.ID),]
+table(rownames(expr.aut)==dictionary$Ensembl.ID)
+rownames(expr.aut) <- dictionary$Hugo
+rm(dictionary)
+
+# Summarise lethal metastatic breast cancer cohort TCR CD3+CD247 data
+expr.aut_tcr <- expr.aut[apply(expr.aut,1, function(x) median(x)>0),]
+expr.aut_tcr <- log2(expr.aut_tcr+0.1)
+f <- expr.aut_tcr[grepl("^CD3D$|^CD3G$|^CD3E$|^CD247$",rownames(expr.aut_tcr)),]
+f <- t(data.frame(TCR=apply(f,2,sum)))
+expr.aut_tcr <- expr.aut_tcr[!grepl("^CD3D$|^CD3G$|^CD3E$|^CD247$",rownames(expr.aut_tcr)),]
+expr.aut_tcr <- rbind(expr.aut_tcr,f)
+
+# Summarise GTEx TCR CD3+CD247 data
+expr.gtex_tcr <- log2(expr.gtex+0.1)
+f <- expr.gtex_tcr[grepl("^CD3D$|^CD3G$|^CD3E$|^CD247$",rownames(expr.gtex_tcr)),]
+f <- t(data.frame(TCR=apply(f[,c(1:ncol(f))],2,sum)))
+expr.gtex_tcr <- expr.gtex_tcr[!grepl("^CD3D$|^CD3G$|^CD3E$|^CD247$",rownames(expr.gtex_tcr)),]
+expr.gtex_tcr <- rbind(expr.gtex_tcr,f)
+rm(f)
+
+expr.gtex_tcr <- expr.gtex_tcr[rownames(expr.gtex_tcr) %in% rownames(expr.aut_tcr),]
+expr.aut_tcr  <- expr.aut_tcr[rownames(expr.aut_tcr) %in% rownames(expr.gtex_tcr),]
+
+# Z score normalise data
+expr.gtex.scaled     <- scale(expr.gtex_tcr, center = TRUE, scale = TRUE)
+expr.aut.scaled <- scale(expr.aut_tcr, center = TRUE, scale = TRUE)
+
+genesToKeep <- "IGHA1$|IGHA2$|IGHG1$|IGHG2$|IGHG3$|IGHG4$|IGHD$|IGHM$|IGHE$|^TCR$"
+
+median.aut  <- apply(expr.aut.scaled[grepl(genesToKeep, rownames(expr.aut.scaled)),],1,median)
+median.gtex <- apply(expr.gtex.scaled[grepl(genesToKeep, rownames(expr.gtex.scaled)),],1,median)
+
+x <- merge(data.frame(median.aut),data.frame(median.gtex),by=0)
+colnames(x) <- c("Gene","Tumour","Normal")
+
+for (i in c(1:nrow(x))){
+  isotype <- x$Gene[i]
+  w <- wilcox.test(expr.aut.scaled[isotype,], gtex.scaled[isotype,])
+  x$pvalue[i] <- w$p.value
+}
+
+pdf(paste0(dir.out.plots,"EFig1d.pdf"),height=3.5,width=5)
+ggplot(x,aes(y=Tumour,x=Normal,label=Gene))+
+  geom_point(aes(size= -log10(pvalue)),fill="tomato",pch=21)+
+  geom_text_repel(force_pull = -0.005,fontface="italic")+
+  geom_abline(intercept = 0,slope=1,linetype="dotted")+
+  labs(x="GTEx normal IGH expression\n(zscore log2 TPM)",
+       y="Tumour IGH expression\n(zscore log2 TPM)")+
+  theme_manuscript()+
+  scale_x_continuous(limits=c(-1.7,1.2))+
+  scale_y_continuous(limits=c(-1.7,1.2))+
+  theme(legend.position = "right",legend.direction = "vertical")
+dev.off()
+
+```
+
+

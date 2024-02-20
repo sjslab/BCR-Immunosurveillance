@@ -1,0 +1,677 @@
+---
+title: "BCR, TCR and genomic similarity"
+author: "Stephen-John Sammut"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r load-data}
+
+rm(list=ls())
+
+set.seed(42)
+
+library (ape)
+library (corrplot)
+library (dendextend)
+library (igraph)
+
+dir.base <- "~/BCR-Immunosurveillance/"
+source (paste0(dir.base,"R/loadData.R"))
+
+# This file contains precomputed BCR and TCR subsampled overlap matrices
+# computed in the section {subsample-bcrs-and-tcrs} below
+file.repertoire.subsampled   <- paste0(dir.out.data,"BCR-TCR_subsampled-counts_10000.RData")
+
+```
+
+```{r subsample-bcrs-and-tcrs, eval=F}
+
+# Perform BCR and TCR subsampling, and compute VDJ Jaccard similarity,
+# VDJ overlap and clonal overlap
+# Pre-computed matrices are available in the data folder.
+
+
+# computes Jaccard index
+jaccard <- function(a, b) {
+  intersection <- length(intersect(a, b))
+  union <- length(a) + length(b) - intersection
+  return (intersection/union)
+}
+
+# populates a Jaccard matrix (m)
+getJaccard <- function(subSampledRows,i,colNumber){
+  m <- matrix(0, ncol=length(unique(subSampledRows$Sample_ID)),
+              nrow=length(unique(subSampledRows$Sample_ID)),
+              dimnames=list(sort(unique(subSampledRows$Sample_ID)), 
+                            sort(unique(subSampledRows$Sample_ID))))
+  m[lower.tri(m)] <- NA
+  
+  for (r in unique(subSampledRows$Sample_ID)){
+    for (c in unique(subSampledRows$Sample_ID)){
+      if (!is.na(m[r,c])){
+        m[r,c] <- jaccard(
+          unique(subSampledRows[subSampledRows$Sample_ID==r, ..colNumber][[1]]),
+          unique(subSampledRows[subSampledRows$Sample_ID==c, ..colNumber][[1]]))
+      }
+    }
+  }
+  
+  m[lower.tri(m)] <- t(m)[lower.tri(m)]
+  m <- reshape2::melt(m)
+  m <- m[!is.na(m$value),]
+  m$iteration <- i
+  colnames(m) <- c("Tumour1","Tumour2","value","iteration")
+  m
+}
+
+
+summariseOverlap <- function(q,i){
+  q<-q[grepl(",",q$V1),]
+  if (nrow(q)>0){
+    #generate a matrix of combinations
+    q <- rbindlist(lapply(q$V1, function(x) data.frame(t(combn(sort(x), m=2)))))
+    q <- q[, .N, by=.(X1, X2)]
+    q$iteration<-i
+  }
+  colnames(q) <- c("Tumour1","Tumour2","value","iteration")
+  q
+}
+
+
+calculateRepertoireOverlap <- function(directory, numIter){
+  donor <- basename(directory)
+  cat("Calculating overlap statistics for donor:",donor,"\n")
+  clusters <- fread(paste0(directory,"/Merge_clustering_",donor,".txt.gz"))
+  clusters$Sequence_ID <- sapply(strsplit(clusters$Sequence_ID,"\\|"),"[",1)
+  colnames(clusters)[1] <- "Cluster_ID"
+  
+  # determine subsampling threshold
+  sequenceFrequencies <- table(clusters$Sample_ID)
+  sequenceThreshold   <- round(min(sequenceFrequencies)*0.9,0)
+  cat (donor,"threshold:",sequenceThreshold,"\n")
+  
+  # subsample numIter times and compute overlaps
+  subsampledVDJs   <- list() 
+  subsampledClones <- list() 
+  jaccardVDJ       <- list()
+  
+  counter=0
+  for (iteration in c(1:numIter)){
+    
+    counter=counter+1
+    if (counter==1000){
+      cat("- 1000 iterations complete\n")
+      counter=0
+    }
+    
+    # from https://stackoverflow.com/questions/16289182/sample-random-rows-within-each-group-in-a-data-table
+    subSampledRows <- clusters[,.SD[sample(.N, min(sequenceThreshold,.N))],by = Sample_ID]
+    
+    # compute VDJ jaccard coefficient
+    jaccardVDJ[[iteration]] <- getJaccard(subSampledRows,iteration,3)
+    
+    # compute VDJ overlap
+    # remove VDJs that are present in one sample only - this will make
+    # generating the overlap matrix much faster
+    q <- subSampledRows[subSampledRows$Sequence_ID %in% 
+                          setDT(subSampledRows)[, .N, by=Sequence_ID][N > 1L]$Sequence_ID,]
+    q <- q[,list(list(unique(Sample_ID))), by="Sequence_ID"]
+    q <- summariseOverlap(q, iteration)
+    if (nrow(q)>0) subsampledVDJs[[iteration]] <- q
+    
+    #compute clone overlap
+    p <- subSampledRows[subSampledRows$Cluster_ID %in% 
+                          setDT(subSampledRows)[, .N, by=Cluster_ID][N > 1L]$Cluster_ID,]
+    p <- p[,list(list(unique(Sample_ID))), by="Cluster_ID"]
+    p <- summariseOverlap(p, iteration)
+    subsampledClones[[iteration]] <- p
+    
+  } #end iterations
+  
+  
+  # consolidate lists containing iterations
+  consolidateList <- function(list){
+    names(list) <- seq_along(list)
+    list <- Filter(Negate(is.null), list)
+    x <- rbindlist(list)
+    x <- reshape2::dcast(x,Tumour1+Tumour2~iteration,value.var="value")
+    x[is.na(x)] <- 0
+    x
+  }
+  
+  jaccardVDJ       <- consolidateList(jaccardVDJ)
+  subsampledVDJs   <- consolidateList(subsampledVDJs)
+  subsampledClones <- consolidateList(subsampledClones)
+  
+  list(vdj.jaccard = jaccardVDJ, 
+       vdj.subsampled = subsampledVDJs,
+       clones.subsampled = subsampledClones)
+}
+
+
+overlapStatistics <- list()
+numIterations     <- 100
+
+# subsample BCRs, 10,000 iterations
+for (d in grep("E308|E315",list.dirs(paste0(dir.mrdarcy.bcr.mets,"output/"),recursive = F),value = T)){
+  f <- calculateRepertoireOverlap(d, numIterations)
+  overlapStatistics[["BCR"]][[basename(d)]] <- f
+}
+
+# subsample TCRs, 10,000 iterations
+for ( e in list.dirs(paste0(dir.mrdarcy.tcr.mets,"output/"),recursive = F)){
+  for (d in grep("E308|E315",list.dirs(e,recursive = F),value = T)){
+    f <- calculateRepertoireOverlap(d,numIterations)
+    overlapStatistics[[basename(e)]][[basename(d)]] <- f
+  }
+}
+
+saveRDS(overlapStatistics,file.repertoire.subsampled)
+
+```
+
+Is BCR infiltration associated with TCR infiltration?
+
+```{r correlate-vdj-overlap}
+
+# Compute median of all iterations
+collapseData <- function(x, receptorClass, subsampleType){
+  x <- x[[receptorClass]]
+  
+  df<-character()
+  for (n in names(x)){
+    df<-rbind(df,
+              data.frame(tumour = paste0(x[[n]][[subsampleType]]$Tumour1,"_",
+                                         x[[n]][[subsampleType]]$Tumour2), 
+                         x=apply(x[[n]][[subsampleType]][,-c(1,2)],1,median),
+                         stringsAsFactors = F)
+    )
+  }
+  df$donor <- substr(df$tumour,1,4)
+  df
+}
+
+# Load precomputed VDJ overlap matrices
+overlaps     <- readRDS(file.repertoire.subsampled)
+overlaps.tra <- collapseData(overlaps, "TRA","vdj.subsampled")
+overlaps.trb <- collapseData(overlaps, "TRB","vdj.subsampled")
+overlaps.bcr <- collapseData(overlaps, "BCR","vdj.subsampled")
+rm(overlaps)
+
+overlaps <- merge(overlaps.tra,overlaps.trb,by="tumour")
+overlaps <- overlaps[,c(1,3,2,4)]
+colnames(overlaps) <- c("tumour","donor","tra.vdj","trb.vdj")
+overlaps <- merge(overlaps,overlaps.bcr[,c(1:2)],by="tumour")
+colnames(overlaps)[5] <- "bcr.vdj"
+overlaps$donor <- gsub("E","",overlaps$donor)
+rm(overlaps.bcr,overlaps.tra,overlaps.trb)
+
+# Overlaps contains number of overlapping downsampled repertoire sequences
+head(overlaps)
+
+df <- reshape2::melt(overlaps,measure.vars=c("tra.vdj","trb.vdj"))
+
+#BCR clonal structures were also significantly correlated with TCRα and TCRβ clonal structures across different metastatic sites, indicating shared factors driving B and T cell infiltration and selection within tumours
+
+plot.fig2b <-
+  ggplot(df, aes(x=bcr.vdj,y=value))+
+  geom_point(size=0.2)+
+  labs(x = "Relative level of shared BCRs between sites",
+       y = "Relative level of shared TCRs between sites")+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  facet_wrap(variable~donor,scales="free")+
+  theme_manuscript(base_size = 6)+
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face="bold"))
+
+pdf(paste0(dir.out.plots,"Fig2b.pdf"), height=6/2.54, width=5/2.54)
+print(plot.fig2b)
+dev.off()
+
+# TCRα and TCRβ clonal structures were significantly correlated across metastases (Extended Data Fig. 2a), in keeping with the common cell origin of these receptors.
+
+plot.overlaps.tra.trb <- 
+  ggplot(overlaps, aes(x=tra.vdj,y=trb.vdj))+
+  geom_point(size=0.2)+
+  labs(x = "Relative level of shared TCRA sequences",
+       y = "Relative level of shared TCRB sequences")+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  facet_wrap(~donor,scales="free")+
+  theme_manuscript(base_size = 6)+
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face="bold"))
+
+pdf(paste0(dir.out.plots,"EFig2a.pdf"),height=3.5/2.54,width=6/2.54)
+print(plot.overlaps.tra.trb)
+dev.off()
+
+rm(plot.fig2b,plot.overlaps.tra.trb,df)
+
+```
+
+
+Correlate with mutations
+
+```{r correlate-vdj-mutations}
+
+# B and T cell clonal compositions mirrored the tumour mutational landscape, with strong associations observed between the number of shared TCRs, BCRs and somatic mutations between metastatic sites 
+
+mutations    <- readRDS(file$dna.mutations)
+mutations$ID <- paste0(mutations$Chr,"_",mutations$Start,"_",mutations$Ref_Allele,"_",
+                       mutations$Tumor_Alt_Allele)
+mutations    <- mutations[grepl("E308|E315",mutations$sample), ]
+
+summariseOverlap <- function(x){
+  x <- x[grepl(",",x$V1),]
+  x <- rbindlist(lapply(x$V1, function(x) data.frame(t(combn(sort(x), m=2)))))
+  x <- x[, .N, by=.(X1, X2)]
+  x$donor  <- substr(x$X1,1,4)
+  x$donor2 <- substr(x$X2,1,4)
+  x <- x[x$donor==x$donor2,]
+  x$donor2 <- NULL
+  x$id <- paste0(x$X1,"_",x$X2)
+  x
+}
+
+x <- mutations[,list(list(unique(sample))), by="ID"]
+x <- summariseOverlap(x)
+
+# merge BCR and TCR data with mutation data
+# cases 308-11 and -12 do not have exome data
+overlaps.mut <- merge(overlaps,x[,c(3,5)],by.x="tumour",by.y="id")
+colnames(overlaps.mut)[ncol(overlaps.mut)] <- "mutations"
+x <- reshape2::melt(overlaps.mut,measure.vars=c("bcr.vdj","tra.vdj","trb.vdj"))
+
+plot.fig2d <-
+  ggplot(x,aes(x=mutations,y=value))+
+  geom_point(size=0.3)+
+  facet_wrap(variable~donor,scales="free",ncol=2)+
+  labs(x="Number of shared mutations between sites",x="Overlap")+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  theme_manuscript(base_size = 6)+
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face="bold"))
+
+
+pdf(paste0(dir.out.plots,"Fig2d.pdf"),height=8/2.54,width=5/2.54)
+print(plot.fig2d)
+dev.off()
+rm(overlaps.mut,x,plot.fig2d)
+
+overlapsTable <- overlaps
+```
+
+
+Generate Jaccard phylogenetic trees
+
+```{r compare-jaccard-phylogenetic-trees}
+
+overlaps <- readRDS(file.repertoire.subsampled)
+tra <- collapseData(overlaps, "TRA","vdj.jaccard")
+trb <- collapseData(overlaps, "TRB","vdj.jaccard")
+bcr <- collapseData(overlaps, "BCR","vdj.jaccard")
+rm(overlaps)
+
+doHclust <- function(x){
+  x$tumour1 <- sapply(strsplit(x$tumour,"_"),"[",1)
+  x$tumour2 <- sapply(strsplit(x$tumour,"_"),"[",2)
+  x <- merge(x,metadata.mets,by.x="tumour1",by.y="Sample.ID")
+  colnames(x)[ncol(x)] <- "t1.site"
+  x <- merge(x,metadata.mets,by.x="tumour2",by.y="Sample.ID")
+  colnames(x)[ncol(x)] <- "t2.site"
+  x$t1.name <- paste0(x$t1.site," (",substr(x$tumour1,6,7),")")
+  x$t2.name <- paste0(x$t2.site," (",substr(x$tumour2,6,7),")")
+  donorTrees <- list()
+  for (donor in unique(x$donor)) {
+    b <- x[x$donor==donor,]
+    z <- data.frame( reshape2::dcast(b,t1.name~t2.name,value.var = "x"), 
+                     row.names = 1 )
+    colnames(z) <- rownames(z)
+    dd <- dist(z, method = "euclidean")
+    hc <- hclust(dd, method = "ward.D2")
+    donorTrees[[donor]]<-hc
+  }
+  return (donorTrees)
+}
+
+hclustTrees <- list()
+hclustTrees[["BCR"]] <- doHclust(bcr)
+hclustTrees[["TRA"]] <- doHclust(tra)
+hclustTrees[["TRB"]] <- doHclust(trb)
+
+onconemFiles <- list.files(file$dna.onconem,pattern="_tree.RData")
+
+mutationTrees<-list()
+for (m in onconemFiles){
+  # subset metadata files
+  md.subset <- metadata.mets[grep(substring(m,1,3),metadata.mets$Sample.ID),]
+  md.subset$Sample.ID <- paste0("0", substring(md.subset$Sample.ID,6,7))
+  md.subset$label <- paste0(md.subset$Disease.site," (",substring(md.subset$Sample.ID,2,3),")")
+  
+  # load onconem files
+  load(paste0(file$dna.onconem,m), verbose = T)
+  on <- collapsed
+  samples <- unlist(on$clones) ## all samples plus normal
+  
+  #remove samples that do not have bcr and tcr seq data
+  samples <- samples[which(samples %in% md.subset$Sample.ID)]
+  nodeIndxPerSample <- sapply(samples,function(s) which(sapply(on$clones, function(x) s%in%x)))
+  
+  ## calculate distance matrix nodes
+  dist <- shortest.paths(graph = on$tree,v = V(on$tree),
+                         to = V(on$tree), weights = on$edgeLength)
+  ## select distances for each sample
+  dist <- dist[nodeIndxPerSample,nodeIndxPerSample]
+  rownames(dist) <- colnames(dist) <- names(nodeIndxPerSample)
+  
+  #subset metadata further
+  md.subset <- md.subset[md.subset$Sample.ID %in% names(nodeIndxPerSample),]
+  
+  rownames(dist)<-colnames(dist)<-md.subset[match(colnames(dist), md.subset$Sample.ID),"label"]
+  
+  dd <- dist(dist ,method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  mutationTrees[[paste0("E",substring(m,1,3))]] <- hc
+}
+hclustTrees[["MUT"]]<-mutationTrees
+
+rm(bcr,tra, trb)
+
+calcTreeSimilarity <- function(tree1, tree2){
+  
+  numOfRands <- 100
+  numOfLabels <- length(tree1$labels)
+  
+  #ensure trees match
+  dends <- intersect_trees(tree1, tree2)
+  realCorr <- cor_cophenetic(dends[[1]], dends[[2]])
+  
+  simCorr <- numeric(numOfRands)
+  for (q in 1:numOfRands){
+    dends_new <- sample.dendrogram(dends[[1]], replace = FALSE)
+    simCorr[q] <- cor_cophenetic(dends_new,dends[[2]])
+  }
+  
+  pvalue <- round(sum(realCorr < simCorr)/ numOfRands, 5)
+  return(list(cor=realCorr,p=pvalue))
+}
+
+pdf(paste0(dir.out.plots,"Fig2e.pdf"),  height=3.5,width=8)
+par(mar=c(1,0,2,0),mfrow=c(2,5))
+set.seed(1)
+for (donor in names(hclustTrees[[1]])){
+  
+  seqNames <- c("BCR","TRA","TRB","MUT")
+  
+  bcr.tree <- as.dendrogram(hclustTrees[["BCR"]][[donor]])
+  tra.tree <- as.dendrogram(hclustTrees[["TRA"]][[donor]])
+  trb.tree <- as.dendrogram(hclustTrees[["TRB"]][[donor]])
+  mut.tree <- as.dendrogram(hclustTrees[["MUT"]][[donor]])
+  
+  list.trees <- list(BCR=bcr.tree, TRA=tra.tree,
+                     TRB=trb.tree, MUT=mut.tree)
+  
+  # calculate tree correlations
+  mat.cor <- matrix(nrow=4,ncol=4,dimnames=list(seqNames,seqNames))
+  mat.p   <- mat.cor
+  mat.cor[upper.tri(mat.cor)] <- 0
+  
+  for (r in c(1:4)){
+    for (c in c(1:4)){
+      if (!is.na(mat.cor[r,c])){
+        tree_r   <- list.trees[[rownames(mat.cor)[r]]]
+        tree_c   <- list.trees[[colnames(mat.cor)[c]]]
+        tree_sim <- calcTreeSimilarity(tree_r,tree_c)
+        mat.cor[r,c] <- tree_sim$cor
+        mat.p[r,c]   <- tree_sim$p
+      }
+    }
+  }
+  mat.cor
+  mat.p
+  
+  # untangle dendrograms
+  dendrograms <- list()
+  dendrograms[[donor]][["TRA"]]<-untangle_step_rotate_2side(bcr.tree, tra.tree)
+  
+  dendrograms[[donor]][["TRB"]]<-untangle_step_rotate_1side(trb.tree,
+                                                            dendrograms[[donor]][["TRA"]][[2]])
+  
+  mutsTree <- intersect_trees(dendrograms[[donor]][["TRA"]][[2]], mut.tree)
+  dendrograms[[donor]][["MUT"]]<-untangle_step_rotate_1side(dend1 = mutsTree[[2]],
+                                                            dend2_fixed = mutsTree[[1]])
+  
+  # plot the phylogenetic trees
+  trees <- list(`BCR tree` = as.phylo(dendrograms[[donor]][["TRA"]][[1]]),
+                `TRA tree` = as.phylo(dendrograms[[donor]][["TRA"]][[2]]),
+                `TRB tree` = as.phylo(dendrograms[[donor]][["TRB"]][[1]]),
+                `Tumour genetic tree` = as.phylo(dendrograms[[donor]][["MUT"]][[1]]))
+  class(trees) <- "multiPhylo"
+  
+  for (i in 1:length(trees)){
+    tips   <- trees[[i]]$tip.label
+    organs <- sapply(strsplit(tips," \\("),"[",1)
+    cols   <- cols.organ[names(cols.organ) %in% organs]
+    mycol  <- cols[factor(organs)]
+    plot(trees[[i]], tip.color = mycol, use.edge.length = F,font=1,cex=1,
+         main=names(trees)[i])
+  }
+
+  #plot correlation matrix
+  cols <- rep(c('#ccebc5','#7bccc4','#2b8cbe','#0868ac','#084081'),2)
+  
+  corrplot(mat.cor, p.mat = mat.p, method = 'circle', addgrid.col = "gray60",
+           col.lim = c(0,1), cl.cex = 0.8,mar = c(0,0,2,0), cl.ratio = 0.3, 
+           cl.pos = "b", sig.level = -1, outline = F, col = c(cols),
+           is.corr = T, type = 'upper', diag=F, tl.col = 'black',
+           insig = "p-value")
+  
+}
+
+dev.off()            
+
+```
+
+
+```{r BCR-clone-spatio-migratory-maps}
+
+# Maps of B cell clonal structure across metastatic sites, generated through quantifying the degree of clonal sharing of the BCR clonotypes between sites (Extended Data Figs. 2f, g), confirmed that there was clonal overlap between most sites within an individual, but the levels were highly variable between sites
+
+# Load BCR clone subsampling data
+
+overlaps     <- readRDS(file.repertoire.subsampled)
+overlaps.bcr <- collapseData(overlaps, "BCR","clones.subsampled")
+
+overlaps.bcr$Tumour1 <- sapply(strsplit(overlaps.bcr$tumour,"_"),"[",1)
+overlaps.bcr$Tumour2 <- sapply(strsplit(overlaps.bcr$tumour,"_"),"[",2)
+overlaps.bcr <- merge(overlaps.bcr,metadata.mets,by.x = "Tumour1",by.y=1)
+overlaps.bcr <- merge(overlaps.bcr,metadata.mets,by.x = "Tumour2",by.y=1)
+overlaps.bcr$Disease.site.x <- paste0(overlaps.bcr$Disease.site.x,"\n(",substr(overlaps.bcr$Tumour1,6,7),")")
+overlaps.bcr$Disease.site.y <- paste0(overlaps.bcr$Disease.site.y,"\n(",substr(overlaps.bcr$Tumour2,6,7),")")
+overlaps.bcr$donor <- substring(overlaps.bcr$Tumour1,1,4)
+overlaps.bcr <- overlaps.bcr[,c("donor","Disease.site.x","Disease.site.y","x")]
+head(overlaps.bcr)
+
+pdf(paste0(dir.out.plots,"EFig2f.pdf"),height=5,width=10)
+par(mfrow=c(1,2)) 
+corrplots <- list()
+
+for (donor in unique(overlaps.bcr$donor)){
+  y <- overlaps.bcr[overlaps.bcr$donor==donor,]
+  q <- reshape2::dcast(Disease.site.x~Disease.site.y,data = y,value.var = "x")
+  rownames(q) <- q$Disease.site.x
+  q$Disease.site.x <- NULL
+  q <- q[,order(sapply(strsplit(colnames(q),"\\("),"[",2))]
+  q <- q[order(sapply(strsplit(rownames(q),"\\("),"[",2)),]
+  
+  #make matrix symmetric
+  q <- cbind(newCol=1,q)
+  colnames(q)[1] <- rownames(q)[1]
+  q <- rbind(q, newRow=1)
+  rownames(q)[nrow(q)] <- colnames(q)[ncol(q)]
+  q <- as.matrix(q)
+  diag(q) <- 100
+  q[lower.tri(q)] <- t(q)[(lower.tri(q))]
+  isSymmetric.matrix(q)
+  corrplots[[donor]]<-q
+  
+  #generate network plot
+  colnames(y)[colnames(y)=="x"]<-"weight"
+  y <- y[y$Disease.site.x!=y$Disease.site.y,]
+  
+  y <- y[as.numeric(gsub("\\)","",gsub("\\(","",sapply(strsplit(y$Disease.site.x,"\n"),"[",2))))<
+           as.numeric(gsub("\\)","",gsub("\\(","",sapply(strsplit(y$Disease.site.y,"\n"),"[",2)))),]
+  y <- y[,c("Disease.site.x","Disease.site.y","weight")]
+  g <- graph.data.frame(y,directed = F)
+  if (donor=="E308"){
+    orderLayout<-c("Liver\n(07)" , "Liver\n(08)" , 
+                   "Lung/pleura\n(11)", "Lung/pleura\n(12)","Lung/pleura\n(14)",
+                   "Pericardium\n(15)","Pericardium\n(16)",
+                   "Bone\n(21)" ,"Bone\n(22)")
+  } else {
+    orderLayout<-c("Liver\n(01)",  "Liver\n(02)",   "Liver\n(04)",
+                   "Lymph node\n(07)" , "Lymph node\n(15)","Lymph node\n(14)",
+                   "Lung/pleura\n(09)", "Lung/pleura\n(12)")
+  }
+  
+  coords <- layout.circle(g, order=orderLayout)
+  
+  vertexNames<-gsub("\n"," ",sapply(strsplit(V(g)$name,"\n\\("),"[",1))
+  
+  V(g)$color<-cols.organ[vertexNames]
+  
+  numPoints=length(unique(c(as.character(y$Var1),as.character(y$Var2))))
+  
+  radian.rescale <- function(x, start=0, direction=1) {
+    c.rotate <- function(x) (x + start) %% (3 * pi) * direction
+    c.rotate(scales::rescale(x, c(0, 3 * pi), range(x)))
+  }
+  lab.locs <- radian.rescale(x=1:numPoints, direction=-1, start=0)
+  
+  plot(g, layout = coords, main=donor,
+       vertex.size=20, vertex.label.dist=1,
+       vertex.label.degree=lab.locs,
+       vertex.label.color="black",
+       vertex.shape="circle",
+       edge.width=(E(g)$weight*0.04)
+  )
+  
+}
+dev.off()
+
+setPlot <- function(cp){
+  colnames(cp) <- gsub("\n"," ",colnames(cp))
+  rownames(cp) <- gsub("\n"," ",rownames(cp))
+  cp[lower.tri(cp)] <- NA
+  cp <- as.matrix(cp)
+  diag(cp) <- NA
+  cp <- cp[,-1]  
+  cp[-nrow(cp),]
+}
+
+corrplots$E308 <- setPlot(corrplots$E308)
+corrplots$E315 <- setPlot(corrplots$E315)
+
+cols <- c('white','#f7fcf0','#e0f3db','#ccebc5','#a8ddb5','#7bccc4',
+          '#4eb3d3','#2b8cbe','#0868ac','#084081')
+
+pdf(paste0(dir.out.plots,"EFig2g.pdf"),height=5,width=12)
+par(mfrow=c(1,2)) 
+corrplot(corrplots$E308,is.corr = F, type = "upper",col.lim = c(0,100),col=cols,
+         tl.col = 'black', tl.cex = 0.8,cl.cex=0.7,tl.srt = 45,cl.pos="b")
+corrplot(corrplots$E315,is.corr = F, type = "upper",col.lim = c(0,250),col=cols,
+         tl.col = 'black', tl.cex = 0.8,cl.cex=0.7,tl.srt = 45,cl.pos="b")
+dev.off()
+
+```
+
+
+Correlate with MHC class I and class II neoantigens
+
+```{r correlate-vdj-mhc}
+
+mutations$ID<-paste0(mutations$Chr,":",mutations$Start,"_",mutations$Ref_Allele,
+                     "/",mutations$Tumor_Alt_Allele,mutations$sample)  
+
+#MHC class I
+mhc1 <- readRDS(file$dna.mhc1Nag)
+mhc1 <- mhc1[,list(list(unique(sample))), by="ID"]
+mhc1 <- summariseOverlap(mhc1)
+
+#MHC class II
+mhc2 <- readRDS(file$dna.mhc2Nag)
+filterNag <- function(x, cutOff){
+  #cut off based on %Rank_best
+  x<-x[x$`%Rank_best`<cutOff,]
+  x<-x[,c(5,16)]
+  x<-x[!duplicated(x),]
+  colnames(x)<-c("ID","sample")
+  x
+}
+
+mhc2 <- do.call(rbind,lapply(mhc2, function(x) filterNag(x,2)))
+mhc2$sample <- gsub("-0","-",paste0("E",mhc2$sample))
+mhc2$ID2    <- paste0(mhc2$ID,mhc2$sample)
+
+#these mutations are neoantigenic
+mhc2 <- mhc2[mhc2$ID2 %in% mutations$ID,]
+mhc2 <- mhc2[,list(list(unique(sample))), by="ID"]
+mhc2 <- summariseOverlap(mhc2)
+
+overlaps.nag <- merge(overlapsTable,mhc1[,c(3,5)],by.x="tumour",by.y="id")
+overlaps.nag <- merge(overlaps.nag,mhc2[,c(3,5)],by.x="tumour",by.y="id")
+
+colnames(overlaps.nag)[c(6,7)]<-c("mhci","mhcii")
+
+#plot association with BCRs
+
+x <- reshape2::melt(overlaps.nag,measure.vars=c("mhci","mhcii"))
+
+pdf(paste0(dir.out.plots,"Fig2f.pdf"),height=5.5/2.54,width=5/2.54)
+ggplot(x,aes(x=bcr.vdj,y=value))+
+  geom_point(size=0.3)+
+  facet_wrap(variable~donor,scales="free",ncol=2)+
+  labs(x="Relative level of shared BCR sequences between sites",y="Number of shared neoantigenic mutations between sites")+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  theme_manuscript(base_size = 6)+
+  theme(panel.border = element_rect(colour = "black"),
+        strip.background = element_blank(),
+        strip.text = element_text(face="bold"))
+dev.off()
+
+
+pdf(paste0(dir.out.plots,"EFig2hi.pdf"),height=7/2.54,width=12/2.54)
+plot.eFig2h <- ggplot(x,aes(x=tra.vdj,y=value))+
+  geom_point(size=0.3)+
+  facet_wrap(variable~donor,scales="free",ncol=2)+
+  labs(x="Relative level of shared TRA sequences between sites",y="Number of shared neoantigenic mutations between sites")+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  theme_manuscript(base_size = 6)+
+  theme(panel.border = element_rect(colour = "black"),
+        strip.background = element_blank(),
+        strip.text = element_text(face="bold"))
+
+plot.eFig2i <- ggplot(x,aes(x=trb.vdj,y=value))+
+  geom_point(size=0.3)+
+  facet_wrap(variable~donor,scales="free",ncol=2)+
+  labs(x="Relative level of shared TRB sequences between sites",y="Number of shared neoantigenic mutations between sites")+
+  geom_smooth(method="lm", formula = y~x, se = T,size=0.5)+
+  stat_p_eq+stat_f_glance+
+  theme_manuscript(base_size = 6)+
+  theme(panel.border = element_rect(colour = "black"),
+        strip.background = element_blank(),
+        strip.text = element_text(face="bold"))
+
+ggarrange(plot.eFig2h,plot.eFig2i)
+
+dev.off()
+
+```
+
